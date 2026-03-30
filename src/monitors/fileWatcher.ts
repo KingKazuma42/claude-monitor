@@ -20,6 +20,49 @@ export interface ClaudeFileActivity {
 
 export class FileWatcher extends EventEmitter {
   private watchers: vscode.FileSystemWatcher[] = [];
+  private workDirCache = new Map<string, string>();
+  private workDirReverseMap = new Map<string, string>();  // encoded -> realPath
+
+  /**
+   * Register a known workDir to build reverse mapping for path decoding.
+   * Finds the encoded directory name that corresponds to this workDir.
+   */
+  registerWorkDir(workDir: string): void {
+    const homeDir = process.env['HOME'] ?? '/root';
+    const projectsDir = path.join(homeDir, '.claude', 'projects');
+
+    // Simple encoding attempt: replace / and _ with -
+    const encoded = '-' + workDir.slice(1).replace(/[/_]/g, '-');
+
+    // Check if this encoded dir exists
+    try {
+      const encodedPath = path.join(projectsDir, encoded);
+      if (fs.existsSync(encodedPath)) {
+        this.workDirReverseMap.set(encoded, workDir);
+        return;
+      }
+    } catch {
+      // Ignore
+    }
+
+    // Fallback: scan all directories and find best match
+    try {
+      const dirs = fs.readdirSync(projectsDir);
+      for (const dir of dirs) {
+        // Try basic decoding
+        const decoded = dir.startsWith('-')
+          ? '/' + dir.slice(1).replace(/-/g, '/')
+          : dir;
+
+        if (decoded === workDir) {
+          this.workDirReverseMap.set(dir, workDir);
+          return;
+        }
+      }
+    } catch {
+      // Ignore errors
+    }
+  }
 
   start(): void {
     // Watch all .claude/projects directories in workspace folders
@@ -149,27 +192,78 @@ export class FileWatcher extends EventEmitter {
     const parts = relative.split(path.sep).filter(Boolean);
     if (parts.length === 0) return '';
 
-    let encoded = parts[0];
-    try {
-      encoded = decodeURIComponent(encoded);
-    } catch {
-      // Ignore invalid encoding
+    const encoded = parts[0];
+
+    // Check reverse map first (most accurate)
+    if (this.workDirReverseMap.has(encoded)) {
+      return this.workDirReverseMap.get(encoded)!;
     }
 
-    if (encoded.startsWith('/')) {
-      return encoded;
-    }
-    if (encoded.startsWith(homeDir)) {
-      return encoded;
-    }
-    if (encoded.includes('home/')) {
-      return path.join('/', encoded);
-    }
-    if (encoded.includes('-')) {
-      return '/' + encoded.replace(/-/g, '/');
+    // Check cache
+    if (this.workDirCache.has(encoded)) {
+      return this.workDirCache.get(encoded)!;
     }
 
-    return encoded;
+    // Claude Code encodes paths by replacing '/' with '-' and '_' with '-'
+    // e.g., /home/ec2-user/repos/foo_bar -> -home-ec2-user-repos-foo-bar
+    // This makes perfect decoding impossible, so we use filesystem checks
+    if (!encoded.startsWith('-')) {
+      return encoded;
+    }
+
+    // Remove leading '-' and split by '-'
+    const segments = encoded.slice(1).split('-');
+
+    // Greedily reconstruct the path by checking filesystem
+    let resolved = '';
+    let i = 0;
+
+    while (i < segments.length) {
+      const nextSegment = segments[i];
+      const candidate = resolved ? path.join(resolved, nextSegment) : '/' + nextSegment;
+
+      if (fs.existsSync(candidate)) {
+        resolved = candidate;
+        i++;
+        continue;
+      }
+
+      // Try with underscore (since '_' is encoded as '-')
+      const candidateUnderscore = resolved ? path.join(resolved, nextSegment.replace(/-/g, '_')) : '/' + nextSegment.replace(/-/g, '_');
+      if (fs.existsSync(candidateUnderscore)) {
+        resolved = candidateUnderscore;
+        i++;
+        continue;
+      }
+
+      // Try combining with next segment (handles multi-word dirs)
+      if (i + 1 < segments.length) {
+        const combinedSegment = nextSegment + '-' + segments[i + 1];
+        const candidateWithNext = resolved ? path.join(resolved, combinedSegment) : '/' + combinedSegment;
+        if (fs.existsSync(candidateWithNext)) {
+          resolved = candidateWithNext;
+          i += 2;
+          continue;
+        }
+
+        // Try with underscore
+        const combinedWithUnderscore = nextSegment + '_' + segments[i + 1];
+        const candidateWithUnderscoreNext = resolved ? path.join(resolved, combinedWithUnderscore) : '/' + combinedWithUnderscore;
+        if (fs.existsSync(candidateWithUnderscoreNext)) {
+          resolved = candidateWithUnderscoreNext;
+          i += 2;
+          continue;
+        }
+      }
+
+      // No match found, append remaining as-is
+      const remaining = segments.slice(i).join('-');
+      resolved = resolved ? path.join(resolved, remaining) : '/' + remaining;
+      break;
+    }
+
+    this.workDirCache.set(encoded, resolved);
+    return resolved;
   }
 
   stop(): void {

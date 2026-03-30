@@ -88,20 +88,39 @@ export async function pickDirectory(startDir: string): Promise<string | undefine
 
 /**
  * Determine the best default start directory:
- * 1. Active editor's directory
- * 2. Single workspace folder root
- * 3. Home directory
+ * 1. Single workspace folder root
+ * 2. Multiple workspace folders: active editor's workspace folder, or first folder
+ * 3. No workspace folders: active editor's directory
+ * 4. Home directory
  */
 export function getDefaultStartDir(): string {
+  const folders = vscode.workspace.workspaceFolders;
+
+  // Single workspace folder: use it
+  if (folders?.length === 1) {
+    return folders[0].uri.fsPath;
+  }
+
+  // Multiple workspace folders: try to find the one containing active editor
+  if (folders && folders.length > 1) {
+    const activeEditor = vscode.window.activeTextEditor;
+    if (activeEditor && !activeEditor.document.isUntitled) {
+      const editorPath = activeEditor.document.uri.fsPath;
+      const matchingFolder = folders.find(f => editorPath.startsWith(f.uri.fsPath));
+      if (matchingFolder) {
+        return matchingFolder.uri.fsPath;
+      }
+    }
+    // No active editor or not in any workspace folder: use first folder
+    return folders[0].uri.fsPath;
+  }
+
+  // No workspace folders: try active editor's directory
   const activeEditor = vscode.window.activeTextEditor;
   if (activeEditor && !activeEditor.document.isUntitled) {
     return path.dirname(activeEditor.document.uri.fsPath);
   }
 
-  const folders = vscode.workspace.workspaceFolders;
-  if (folders?.length === 1) {
-    return folders[0].uri.fsPath;
-  }
-
+  // Fallback: home directory
   return os.homedir();
 }
