@@ -1,0 +1,284 @@
+* {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+}
+
+body {
+  font-family: var(--vscode-font-family);
+  font-size: var(--vscode-font-size);
+  color: var(--vscode-foreground);
+  background: var(--vscode-sideBar-background);
+  padding: 0;
+}
+
+/* ── Session List ── */
+.session-list {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 6px;
+}
+
+.empty-state {
+  padding: 24px 16px;
+  text-align: center;
+  color: var(--vscode-descriptionForeground);
+  font-size: 12px;
+  line-height: 1.6;
+}
+
+/* ── Session Card ── */
+.session-card {
+  background: var(--vscode-editor-background);
+  border: 1px solid var(--vscode-widget-border, #444);
+  border-radius: 4px;
+  overflow: hidden;
+}
+
+.session-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 10px;
+  cursor: pointer;
+  user-select: none;
+}
+
+.session-header:hover {
+  background: var(--vscode-list-hoverBackground);
+}
+
+.status-dot {
+  flex-shrink: 0;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--vscode-descriptionForeground);
+}
+
+.status-dot.running {
+  background: #4caf50;
+  box-shadow: 0 0 4px #4caf5088;
+}
+
+.status-dot.idle {
+  background: #ffc107;
+}
+
+.status-dot.stopped {
+  background: var(--vscode-descriptionForeground);
+}
+
+.session-title {
+  flex: 1;
+  font-weight: 600;
+  font-size: 12px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.session-pid {
+  font-size: 11px;
+  color: var(--vscode-descriptionForeground);
+}
+
+.expand-icon {
+  font-size: 10px;
+  color: var(--vscode-descriptionForeground);
+  transition: transform 0.15s;
+  flex-shrink: 0;
+}
+
+.session-card.expanded .expand-icon {
+  transform: rotate(90deg);
+}
+
+/* ── Session Meta ── */
+.session-meta {
+  padding: 0 10px 8px 26px;
+  font-size: 11px;
+  color: var(--vscode-descriptionForeground);
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.meta-item {
+  display: flex;
+  align-items: center;
+  gap: 3px;
+}
+
+/* ── Session Actions ── */
+.session-actions {
+  display: flex;
+  gap: 6px;
+  padding: 0 10px 8px 26px;
+}
+
+.btn {
+  padding: 3px 10px;
+  font-size: 11px;
+  border: 1px solid var(--vscode-button-border, transparent);
+  border-radius: 3px;
+  cursor: pointer;
+  background: var(--vscode-button-secondaryBackground);
+  color: var(--vscode-button-secondaryForeground);
+}
+
+.btn:hover {
+  background: var(--vscode-button-secondaryHoverBackground);
+}
+
+.btn.primary {
+  background: var(--vscode-button-background);
+  color: var(--vscode-button-foreground);
+}
+
+.btn.primary:hover {
+  background: var(--vscode-button-hoverBackground);
+}
+
+/* ── Session Detail ── */
+.session-detail {
+  display: none;
+  padding: 8px 10px;
+  border-top: 1px solid var(--vscode-widget-border, #444);
+}
+
+.session-card.expanded .session-detail {
+  display: block;
+}
+
+.detail-section {
+  margin-bottom: 10px;
+}
+
+.detail-label {
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--vscode-descriptionForeground);
+  margin-bottom: 4px;
+}
+
+/* ── Log Output ── */
+.log-output {
+  background: var(--vscode-terminal-background, #1e1e1e);
+  color: var(--vscode-terminal-foreground, #cccccc);
+  font-family: var(--vscode-editor-font-family, monospace);
+  font-size: 11px;
+  padding: 6px 8px;
+  border-radius: 3px;
+  max-height: 160px;
+  overflow-y: auto;
+  white-space: pre-wrap;
+  word-break: break-all;
+}
+
+/* ── Instruction Input ── */
+.instruction-form {
+  display: flex;
+  gap: 6px;
+  margin-top: 6px;
+}
+
+.instruction-input {
+  flex: 1;
+  padding: 4px 8px;
+  font-size: 12px;
+  font-family: var(--vscode-font-family);
+  background: var(--vscode-input-background);
+  color: var(--vscode-input-foreground);
+  border: 1px solid var(--vscode-input-border, #444);
+  border-radius: 3px;
+  outline: none;
+}
+
+.instruction-input:focus {
+  border-color: var(--vscode-focusBorder);
+}
+
+/* ── Resource Bars ── */
+.resource-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 4px;
+  font-size: 11px;
+}
+
+.resource-label {
+  width: 36px;
+  color: var(--vscode-descriptionForeground);
+}
+
+.resource-bar-track {
+  flex: 1;
+  height: 6px;
+  background: var(--vscode-progressBar-background, #333);
+  border-radius: 3px;
+  overflow: hidden;
+}
+
+.resource-bar-fill {
+  height: 100%;
+  border-radius: 3px;
+  background: var(--vscode-progressBar-background, #0e70c0);
+  transition: width 0.4s;
+}
+
+.resource-value {
+  width: 50px;
+  text-align: right;
+  color: var(--vscode-descriptionForeground);
+}
+
+/* ── Conversation ── */
+.conversation {
+  max-height: 200px;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.message {
+  padding: 5px 8px;
+  border-radius: 4px;
+  font-size: 11px;
+  line-height: 1.4;
+}
+
+.message.user {
+  background: var(--vscode-inputValidation-infoBorder, #1e4d78);
+  align-self: flex-end;
+  max-width: 90%;
+}
+
+.message.assistant {
+  background: var(--vscode-editor-lineHighlightBackground, #2a2a2a);
+  align-self: flex-start;
+  max-width: 95%;
+}
+
+.message-role {
+  font-size: 10px;
+  font-weight: 600;
+  opacity: 0.7;
+  margin-bottom: 2px;
+}
+
+/* ── Scrollbar ── */
+::-webkit-scrollbar {
+  width: 6px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background: var(--vscode-scrollbarSlider-background);
+  border-radius: 3px;
+}

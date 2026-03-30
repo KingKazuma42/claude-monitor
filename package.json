@@ -1,0 +1,92 @@
+{
+  "name": "claude-monitor",
+  "displayName": "Claude Monitor",
+  "description": "Monitor and control multiple Claude Code CLI instances from VSCode",
+  "version": "0.1.0",
+  "engines": {
+    "vscode": "^1.74.0"
+  },
+  "categories": ["Other"],
+  "activationEvents": ["onStartupFinished"],
+  "main": "./out/extension.js",
+  "contributes": {
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "claudeMonitor",
+          "title": "Claude Monitor",
+          "icon": "$(robot)"
+        }
+      ]
+    },
+    "views": {
+      "claudeMonitor": [
+        {
+          "type": "webview",
+          "id": "claudeMonitor.panel",
+          "name": "Sessions"
+        }
+      ]
+    },
+    "commands": [
+      {
+        "command": "claudeMonitor.refresh",
+        "title": "Refresh",
+        "icon": "$(refresh)",
+        "category": "Claude Monitor"
+      },
+      {
+        "command": "claudeMonitor.newSession",
+        "title": "New Claude Session",
+        "icon": "$(add)",
+        "category": "Claude Monitor"
+      },
+      {
+        "command": "claudeMonitor.focusPanel",
+        "title": "Show Claude Monitor Panel",
+        "category": "Claude Monitor"
+      }
+    ],
+    "menus": {
+      "view/title": [
+        {
+          "command": "claudeMonitor.refresh",
+          "when": "view == claudeMonitor.panel",
+          "group": "navigation"
+        },
+        {
+          "command": "claudeMonitor.newSession",
+          "when": "view == claudeMonitor.panel",
+          "group": "navigation"
+        }
+      ]
+    },
+    "configuration": {
+      "title": "Claude Monitor",
+      "properties": {
+        "claudeMonitor.pollIntervalMs": {
+          "type": "number",
+          "default": 5000,
+          "description": "Process polling interval in milliseconds"
+        },
+        "claudeMonitor.maxLogLines": {
+          "type": "number",
+          "default": 100,
+          "description": "Maximum number of output log lines to keep per session"
+        }
+      }
+    }
+  },
+  "scripts": {
+    "vscode:prepublish": "npm run compile",
+    "compile": "tsc -p ./",
+    "watch": "tsc -watch -p ./",
+    "pretest": "npm run compile",
+    "lint": "eslint src --ext ts"
+  },
+  "devDependencies": {
+    "@types/node": "^18.0.0",
+    "@types/vscode": "^1.74.0",
+    "typescript": "^5.0.0"
+  }
+}
