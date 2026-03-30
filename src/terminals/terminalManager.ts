@@ -84,11 +84,25 @@ export class TerminalManager extends EventEmitter {
    * Create a new terminal running Claude Code.
    * @param workDir Working directory
    * @param model Optional --model flag value (e.g. "claude-opus-4-5-20251001")
+   * @param agent Optional --agent flag value (e.g. "reviewer")
    */
-  createClaudeTerminal(workDir?: string, model?: string): vscode.Terminal {
-    const args = model ? `--model ${model}` : '';
-    const cmd = args ? `claude ${args}` : 'claude';
-    const name = model ? `claude (${model.split('-').slice(1, 3).join('-')})` : 'claude';
+  createClaudeTerminal(workDir?: string, model?: string, agent?: string): vscode.Terminal {
+    const args: string[] = [];
+    if (model) {
+      args.push(`--model ${model}`);
+    }
+    if (agent) {
+      args.push(`--agent ${agent}`);
+    }
+
+    const cmd = args.length > 0 ? `claude ${args.join(' ')}` : 'claude';
+
+    let name = 'claude';
+    if (agent) {
+      name = `claude (${agent})`;
+    } else if (model) {
+      name = `claude (${model.split('-').slice(1, 3).join('-')})`;
+    }
 
     const terminal = vscode.window.createTerminal({ name, cwd: workDir });
     terminal.show();

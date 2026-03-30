@@ -8,9 +8,17 @@ export class ClaudeMonitorPanel implements vscode.WebviewViewProvider {
 
   private view?: vscode.WebviewView;
   private readonly extensionUri: vscode.Uri;
+  private resolveCallbacks: Array<() => void> = [];
 
   constructor(extensionUri: vscode.Uri) {
     this.extensionUri = extensionUri;
+  }
+
+  /**
+   * Register a callback to be invoked when the webview is resolved
+   */
+  onDidResolve(callback: () => void): void {
+    this.resolveCallbacks.push(callback);
   }
 
   resolveWebviewView(
@@ -29,6 +37,16 @@ export class ClaudeMonitorPanel implements vscode.WebviewViewProvider {
     };
 
     webviewView.webview.html = this.getHtml(webviewView.webview);
+
+    // Clean up when disposed
+    webviewView.onDidDispose(() => {
+      this.view = undefined;
+    });
+
+    // Notify listeners that the webview is now ready
+    for (const cb of this.resolveCallbacks) {
+      cb();
+    }
   }
 
   /**
