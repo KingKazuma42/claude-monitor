@@ -16,21 +16,23 @@ export class ClaudeStatusBar {
   }
 
   update(sessions: ClaudeSession[]): void {
-    const running = sessions.filter(s => s.status === 'running').length;
-    const idle = sessions.filter(s => s.status === 'idle').length;
-    const total = sessions.length;
+    const thinking = sessions.filter(s => s.status === 'thinking').length;
+    const waiting  = sessions.filter(s => s.status === 'waiting').length;
+    const idle     = sessions.filter(s => s.status === 'idle').length;
+    const active   = sessions.filter(s => s.status !== 'stopped').length;
 
-    if (total === 0) {
+    if (active === 0) {
       this.item.text = '$(robot) Claude: なし';
       this.item.color = undefined;
-    } else if (running > 0) {
-      this.item.text = `$(robot) Claude: ${running} 実行中`;
-      if (idle > 0) {
-        this.item.text += ` / ${idle} 待機`;
-      }
+    } else if (thinking > 0) {
+      this.item.text = `$(robot) Claude: ${thinking} 考え中`;
+      if (waiting > 0) this.item.text += ` / ${waiting} 待機`;
       this.item.color = new vscode.ThemeColor('statusBarItem.prominentForeground');
+    } else if (waiting > 0) {
+      this.item.text = `$(robot) Claude: ${waiting} 入力待ち`;
+      this.item.color = undefined;
     } else {
-      this.item.text = `$(robot) Claude: ${idle} 待機`;
+      this.item.text = `$(robot) Claude: ${idle} アイドル`;
       this.item.color = undefined;
     }
   }

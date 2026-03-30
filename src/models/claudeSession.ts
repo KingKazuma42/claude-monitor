@@ -1,6 +1,6 @@
 import * as vscode from 'vscode';
 
-export type SessionStatus = 'running' | 'idle' | 'stopped';
+export type SessionStatus = 'thinking' | 'waiting' | 'idle' | 'stopped';
 
 export interface ClaudeSession {
   id: string;
@@ -23,7 +23,7 @@ export function createSession(pid: number, workDir: string, terminal?: vscode.Te
     pid,
     terminalName: terminal?.name ?? `claude (${pid})`,
     workDir,
-    status: 'running',
+    status: 'idle',
     startedAt: now,
     lastActivity: now,
     outputLog: [],

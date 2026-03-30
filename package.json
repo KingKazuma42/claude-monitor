@@ -3,6 +3,7 @@
   "displayName": "Claude Monitor",
   "description": "Monitor and control multiple Claude Code CLI instances from VSCode",
   "version": "0.1.0",
+  "license": "MIT",
   "engines": {
     "vscode": "^1.74.0"
   },
@@ -81,6 +82,7 @@
     "vscode:prepublish": "npm run compile",
     "compile": "tsc -p ./",
     "watch": "tsc -watch -p ./",
+    "package": "npx vsce package",
     "pretest": "npm run compile",
     "lint": "eslint src --ext ts"
   },

@@ -23,18 +23,9 @@ export class TerminalManager extends EventEmitter {
       vscode.window.onDidCloseTerminal(t => this.removeTerminal(t))
     );
 
-    // Shell integration output capture (VSCode 1.74+)
-    if ('onDidWriteTerminalData' in vscode.window) {
-      const onWrite = (vscode.window as unknown as {
-        onDidWriteTerminalData: (handler: (e: { terminal: vscode.Terminal; data: string }) => void) => vscode.Disposable
-      }).onDidWriteTerminalData;
-
-      this.disposables.push(
-        onWrite((e: { terminal: vscode.Terminal; data: string }) => {
-          this.emit('data', e.terminal, e.data);
-        })
-      );
-    }
+    // Note: onDidWriteTerminalData is a proposed API (terminalDataWriteEvent)
+    // and cannot be used in published extensions. Terminal output capture
+    // is skipped; logs are populated via file watcher instead.
   }
 
   private async trackTerminal(terminal: vscode.Terminal): Promise<void> {
@@ -90,15 +81,18 @@ export class TerminalManager extends EventEmitter {
   }
 
   /**
-   * Create a new terminal running Claude Code
+   * Create a new terminal running Claude Code.
+   * @param workDir Working directory
+   * @param model Optional --model flag value (e.g. "claude-opus-4-5-20251001")
    */
-  createClaudeTerminal(workDir?: string): vscode.Terminal {
-    const terminal = vscode.window.createTerminal({
-      name: 'claude',
-      cwd: workDir,
-    });
+  createClaudeTerminal(workDir?: string, model?: string): vscode.Terminal {
+    const args = model ? `--model ${model}` : '';
+    const cmd = args ? `claude ${args}` : 'claude';
+    const name = model ? `claude (${model.split('-').slice(1, 3).join('-')})` : 'claude';
+
+    const terminal = vscode.window.createTerminal({ name, cwd: workDir });
     terminal.show();
-    terminal.sendText('claude', true);
+    terminal.sendText(cmd, true);
     return terminal;
   }
 

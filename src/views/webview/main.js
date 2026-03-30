@@ -10,12 +10,79 @@ const expandedSessions = new Map();
 let currentSessions = [];
 
 /**
+ * Save input values and scroll positions before a re-render.
+ * @returns {{ inputs: Map<string, string>, scrolls: Map<string, {top: number, atBottom: boolean}> }}
+ */
+function saveUiState() {
+  const inputs = new Map();
+  const scrolls = new Map();
+  let focusedId = '';
+  let selectionStart = null;
+  let selectionEnd = null;
+
+  document.querySelectorAll('.instruction-input').forEach(el => {
+    const input = /** @type {HTMLInputElement} */ (el);
+    if (input.value) inputs.set(input.dataset.id ?? '', input.value);
+    if (document.activeElement === input) {
+      focusedId = input.dataset.id ?? '';
+      selectionStart = input.selectionStart;
+      selectionEnd = input.selectionEnd;
+    }
+  });
+
+  document.querySelectorAll('[data-scroll-key]').forEach(el => {
+    const key = /** @type {HTMLElement} */ (el).dataset.scrollKey ?? '';
+    const atBottom = el.scrollHeight - el.scrollTop <= el.clientHeight + 20;
+    scrolls.set(key, { top: el.scrollTop, atBottom });
+  });
+
+  return { inputs, scrolls, focusedId, selectionStart, selectionEnd };
+}
+
+/**
+ * Restore input values and scroll positions after a re-render.
+ * @param {{ inputs: Map<string, string>, scrolls: Map<string, {top: number, atBottom: boolean}>, focusedId: string, selectionStart: number | null, selectionEnd: number | null }} state
+ */
+function restoreUiState(state) {
+  document.querySelectorAll('.instruction-input').forEach(el => {
+    const input = /** @type {HTMLInputElement} */ (el);
+    const saved = state.inputs.get(input.dataset.id ?? '');
+    if (saved) input.value = saved;
+  });
+
+  document.querySelectorAll('[data-scroll-key]').forEach(el => {
+    const key = /** @type {HTMLElement} */ (el).dataset.scrollKey ?? '';
+    const saved = state.scrolls.get(key);
+    if (!saved || saved.atBottom) {
+      // New element or was already at bottom → scroll to bottom
+      el.scrollTop = el.scrollHeight;
+    } else {
+      el.scrollTop = saved.top;
+    }
+  });
+
+  if (state.focusedId) {
+    const input = /** @type {HTMLInputElement | null} */ (
+      document.querySelector(`.instruction-input[data-id="${state.focusedId}"]`)
+    );
+    if (input) {
+      input.focus();
+      if (typeof state.selectionStart === 'number' && typeof state.selectionEnd === 'number') {
+        input.setSelectionRange(state.selectionStart, state.selectionEnd);
+      }
+    }
+  }
+}
+
+/**
  * @param {any[]} sessions
  */
 function renderSessions(sessions) {
   currentSessions = sessions;
   const list = document.getElementById('session-list');
   if (!list) return;
+
+  const uiState = saveUiState();
 
   if (sessions.length === 0) {
     list.innerHTML = `
@@ -29,7 +96,9 @@ function renderSessions(sessions) {
 
   list.innerHTML = sessions.map(session => renderSessionCard(session)).join('');
 
-  // Re-attach event listeners
+  restoreUiState(uiState);
+
+  // ── Event listeners ──
   list.querySelectorAll('.session-header').forEach(header => {
     header.addEventListener('click', () => {
       const id = /** @type {HTMLElement} */ (header).dataset.id;
@@ -47,12 +116,20 @@ function renderSessions(sessions) {
     });
   });
 
+  list.querySelectorAll('.btn-kill').forEach(btn => {
+    btn.addEventListener('click', e => {
+      e.stopPropagation();
+      const id = /** @type {HTMLElement} */ (btn).dataset.id;
+      vscode.postMessage({ type: 'killSession', sessionId: id });
+    });
+  });
+
   list.querySelectorAll('.btn-send').forEach(btn => {
     btn.addEventListener('click', e => {
       e.stopPropagation();
       const id = /** @type {HTMLElement} */ (btn).dataset.id;
       const input = /** @type {HTMLInputElement | null} */ (
-        document.querySelector(`.instruction-input[data-id="${id}"]`)
+        list.querySelector(`.instruction-input[data-id="${id}"]`)
       );
       if (!input || !input.value.trim()) return;
       vscode.postMessage({ type: 'sendInstruction', sessionId: id, text: input.value });
@@ -82,34 +159,32 @@ function renderSessionCard(session) {
   const lastActivityStr = formatRelative(new Date(session.lastActivity));
   const cpuPct = Math.min(100, session.cpuPercent ?? 0);
   const memMB = session.memoryMB ?? 0;
+  const isExternal = session.isExternal === true;
 
-  const logHtml = (session.outputLog ?? []).slice(-50).join('\n') || '(出力なし)';
+  const logLines = (session.outputLog ?? []).slice(-50);
+  const logHtml = logLines.length ? escapeHtml(logLines.join('\n')) : '<span class="muted">(出力なし)</span>';
 
-  const conversationHtml = (session.conversation ?? [])
-    .slice(-10)
-    .map(/** @param {any} m */ m => `
-      <div class="message ${m.role}">
-        <div class="message-role">${m.role === 'user' ? 'You' : 'Claude'}</div>
-        <div>${escapeHtml(m.content.slice(0, 300))}</div>
-      </div>
-    `)
-    .join('') || '<div style="color:var(--vscode-descriptionForeground);font-size:11px">会話なし</div>';
+  const conversationHtml = buildConversationHtml(session.conversation ?? []);
+
+  const focusBtn = isExternal
+    ? '' // 別ウィンドウはターミナルを直接開けないので非表示
+    : `<button class="btn btn-focus" data-id="${session.id}">ターミナルを開く</button>`;
 
   return `
     <div class="session-card ${expanded ? 'expanded' : ''}" data-id="${session.id}">
       <div class="session-header" data-id="${session.id}">
         <span class="status-dot ${statusClass}"></span>
         <span class="session-title">${escapeHtml(session.terminalName)}</span>
+        ${isExternal ? '<span class="badge-external">別ウィンドウ</span>' : ''}
         <span class="session-pid">PID ${session.pid}</span>
         <span class="expand-icon">▶</span>
       </div>
       <div class="session-meta">
-        <span class="meta-item" title="作業ディレクトリ">📁 ${escapeHtml(shortenPath(session.workDir))}</span>
+        <span class="meta-item" title="${escapeHtml(session.workDir)}">📁 ${escapeHtml(shortenPath(session.workDir))}</span>
         <span class="meta-item">🕐 ${lastActivityStr}</span>
+        <span class="status-label status-label-${statusClass}">${statusLabel(statusClass)}</span>
       </div>
-      <div class="session-actions">
-        <button class="btn btn-focus" data-id="${session.id}">ターミナルを開く</button>
-      </div>
+      ${focusBtn ? `<div class="session-actions">${focusBtn}</div>` : ''}
       <div class="session-detail">
         <div class="detail-section">
           <div class="detail-label">リソース</div>
@@ -130,12 +205,13 @@ function renderSessionCard(session) {
         </div>
         <div class="detail-section">
           <div class="detail-label">会話</div>
-          <div class="conversation">${conversationHtml}</div>
+          <div class="conversation" data-scroll-key="conv-${session.id}">${conversationHtml}</div>
         </div>
         <div class="detail-section">
           <div class="detail-label">出力ログ</div>
-          <div class="log-output">${escapeHtml(logHtml)}</div>
+          <div class="log-output" data-scroll-key="log-${session.id}">${logHtml}</div>
         </div>
+        ${isExternal ? '' : `
         <div class="detail-section">
           <div class="detail-label">指示を送る</div>
           <div class="instruction-form">
@@ -148,13 +224,38 @@ function renderSessionCard(session) {
             <button class="btn primary btn-send" data-id="${session.id}">送信</button>
           </div>
         </div>
+        `}
+        <div class="detail-section detail-section-kill">
+          <button class="btn danger btn-kill" data-id="${session.id}">セッションを終了 (Kill)</button>
+        </div>
       </div>
     </div>`;
 }
 
+/**
+ * Build readable conversation HTML from entries.
+ * @param {any[]} entries
+ */
+function buildConversationHtml(entries) {
+  if (!entries.length) {
+    return '<div class="muted" style="font-size:11px">会話なし</div>';
+  }
+  return entries.slice(-20).map(m => {
+    const roleLabel = m.role === 'user' ? 'You' : 'Claude';
+    // Trim very long messages
+    const text = (m.content ?? '').trim();
+    const display = text.length > 500 ? text.slice(0, 500) + '…' : text;
+    return `
+      <div class="message ${m.role}">
+        <div class="message-role">${roleLabel}</div>
+        <div class="message-content">${escapeHtml(display)}</div>
+      </div>`;
+  }).join('');
+}
+
 /** @param {string} text */
 function escapeHtml(text) {
-  return text
+  return String(text)
     .replace(/&/g, '&amp;')
     .replace(/</g, '&lt;')
     .replace(/>/g, '&gt;')
@@ -182,6 +283,17 @@ function formatRelative(d) {
   return `${Math.floor(diff / 3600000)}時間前`;
 }
 
+/** @param {string} status */
+function statusLabel(status) {
+  switch (status) {
+    case 'thinking': return '考え中...';
+    case 'waiting':  return '入力待ち';
+    case 'idle':     return 'アイドル';
+    case 'stopped':  return '停止';
+    default:         return status;
+  }
+}
+
 /** @param {number} pct */
 function cpuColor(pct) {
   if (pct > 70) return '#f44336';
@@ -199,5 +311,4 @@ window.addEventListener('message', event => {
   }
 });
 
-// Initial render
 renderSessions([]);

@@ -13,6 +13,8 @@ export interface ClaudeFileActivity {
   workDir: string;
   filePath: string;
   entries: ConversationEntry[];
+  /** Role of the last entry: user → Claude is thinking, assistant → waiting for input */
+  lastEntryRole: 'user' | 'assistant' | null;
   updatedAt: Date;
 }
 
@@ -20,14 +22,17 @@ export class FileWatcher extends EventEmitter {
   private watchers: vscode.FileSystemWatcher[] = [];
 
   start(): void {
-    // Watch all .claude directories in workspace folders
-    const pattern = new vscode.RelativePattern('/', '**/.claude/projects/**/*.jsonl');
-    const watcher = vscode.workspace.createFileSystemWatcher(pattern);
+    // Watch all .claude/projects directories in workspace folders
+    const folders = vscode.workspace.workspaceFolders ?? [];
+    for (const folder of folders) {
+      const pattern = new vscode.RelativePattern(folder.uri.fsPath, '**/.claude/projects/**/*.jsonl');
+      const watcher = vscode.workspace.createFileSystemWatcher(pattern);
 
-    watcher.onDidChange(uri => this.handleChange(uri));
-    watcher.onDidCreate(uri => this.handleChange(uri));
+      watcher.onDidChange(uri => this.handleChange(uri));
+      watcher.onDidCreate(uri => this.handleChange(uri));
 
-    this.watchers.push(watcher);
+      this.watchers.push(watcher);
+    }
 
     // Also watch home directory .claude
     const homeClaude = path.join(process.env['HOME'] ?? '/root', '.claude', 'projects');
@@ -49,10 +54,12 @@ export class FileWatcher extends EventEmitter {
       const entries = this.readJsonlFile(uri.fsPath);
       const workDir = this.inferWorkDir(uri.fsPath);
 
+      const lastEntry = entries[entries.length - 1] ?? null;
       const activity: ClaudeFileActivity = {
         workDir,
         filePath: uri.fsPath,
         entries,
+        lastEntryRole: lastEntry?.role ?? null,
         updatedAt: new Date(),
       };
 
@@ -70,16 +77,20 @@ export class FileWatcher extends EventEmitter {
       if (!line.trim()) continue;
       try {
         const obj = JSON.parse(line);
-        if (obj.type === 'user' || obj.role === 'user') {
-          entries.push({
+        const msgContent = obj.message?.content ?? obj.content;
+        const role = this.getMessageRole(obj);
+        if (role === 'user') {
+          const text = this.extractText(msgContent);
+          if (text) entries.push({
             role: 'user',
-            content: this.extractText(obj.message ?? obj.content ?? obj),
+            content: text,
             timestamp: obj.timestamp ? new Date(obj.timestamp) : undefined,
           });
-        } else if (obj.type === 'assistant' || obj.role === 'assistant') {
-          entries.push({
+        } else if (role === 'assistant') {
+          const text = this.extractText(msgContent, /* skipTools */ true);
+          if (text) entries.push({
             role: 'assistant',
-            content: this.extractText(obj.message ?? obj.content ?? obj),
+            content: text,
             timestamp: obj.timestamp ? new Date(obj.timestamp) : undefined,
           });
         }
@@ -91,34 +102,74 @@ export class FileWatcher extends EventEmitter {
     return entries;
   }
 
-  private extractText(value: unknown): string {
-    if (typeof value === 'string') return value;
+  private getMessageRole(obj: any): 'user' | 'assistant' | null {
+    if (!obj || typeof obj !== 'object') return null;
+    const explicitRole = obj.message?.role;
+    if (explicitRole === 'user' || explicitRole === 'assistant') {
+      return explicitRole;
+    }
+
+    const role = obj.role ?? obj.type;
+    if (role === 'user' || role === 'assistant') {
+      return role;
+    }
+
+    return null;
+  }
+
+  private extractText(value: unknown, skipTools = false): string {
+    if (typeof value === 'string') return value.trim();
     if (Array.isArray(value)) {
       return value
+        .filter(item => {
+          if (!skipTools) return true;
+          // Skip tool_use / tool_result blocks in assistant messages
+          return !(item && typeof item === 'object' && 'type' in item &&
+            (item.type === 'tool_use' || item.type === 'tool_result'));
+        })
         .map(item => {
           if (typeof item === 'string') return item;
           if (item && typeof item === 'object' && 'text' in item) return String(item.text);
           return '';
         })
-        .join('');
+        .filter(s => s.trim())
+        .join('\n')
+        .trim();
     }
     if (value && typeof value === 'object' && 'text' in value) {
-      return String((value as { text: unknown }).text);
+      return String((value as { text: unknown }).text).trim();
     }
-    return JSON.stringify(value);
+    return '';
   }
 
   private inferWorkDir(filePath: string): string {
-    // ~/.claude/projects/<encoded-path>/...
     const homeDir = process.env['HOME'] ?? '/root';
     const projectsDir = path.join(homeDir, '.claude', 'projects');
     const relative = path.relative(projectsDir, filePath);
-    const parts = relative.split(path.sep);
-    if (parts.length > 0) {
-      // The directory name is the URL-encoded or path-encoded workspace path
-      return parts[0].replace(/-/g, '/');
+    const parts = relative.split(path.sep).filter(Boolean);
+    if (parts.length === 0) return '';
+
+    let encoded = parts[0];
+    try {
+      encoded = decodeURIComponent(encoded);
+    } catch {
+      // Ignore invalid encoding
     }
-    return '';
+
+    if (encoded.startsWith('/')) {
+      return encoded;
+    }
+    if (encoded.startsWith(homeDir)) {
+      return encoded;
+    }
+    if (encoded.includes('home/')) {
+      return path.join('/', encoded);
+    }
+    if (encoded.includes('-')) {
+      return '/' + encoded.replace(/-/g, '/');
+    }
+
+    return encoded;
   }
 
   stop(): void {

@@ -49,6 +49,7 @@ export class ClaudeMonitorPanel implements vscode.WebviewViewProvider {
       cpuPercent: s.cpuPercent ?? 0,
       memoryMB: s.memoryMB ?? 0,
       conversation: (s as any).conversation ?? [],
+      isExternal: s.terminal === undefined,
     }));
 
     this.view.webview.postMessage({ type: 'update', sessions: payload });
@@ -97,7 +98,7 @@ export class ClaudeMonitorPanel implements vscode.WebviewViewProvider {
 }
 
 export interface WebviewMessage {
-  type: 'sendInstruction' | 'focusTerminal' | 'refresh';
+  type: 'sendInstruction' | 'focusTerminal' | 'killSession' | 'refresh';
   sessionId?: string;
   text?: string;
 }
