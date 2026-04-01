@@ -161,9 +161,6 @@ function renderSessionCard(session) {
   const memMB = session.memoryMB ?? 0;
   const isExternal = session.isExternal === true;
 
-  const logLines = (session.outputLog ?? []).slice(-50);
-  const logHtml = logLines.length ? escapeHtml(logLines.join('\n')) : '<span class="muted">(出力なし)</span>';
-
   const conversationHtml = buildConversationHtml(session.conversation ?? []);
 
   const focusBtn = isExternal
@@ -206,10 +203,6 @@ function renderSessionCard(session) {
         <div class="detail-section">
           <div class="detail-label">会話</div>
           <div class="conversation" data-scroll-key="conv-${session.id}">${conversationHtml}</div>
-        </div>
-        <div class="detail-section">
-          <div class="detail-label">出力ログ</div>
-          <div class="log-output" data-scroll-key="log-${session.id}">${logHtml}</div>
         </div>
         ${isExternal ? '' : `
         <div class="detail-section">

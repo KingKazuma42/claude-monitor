@@ -13,6 +13,9 @@ import { pickDirectory, getDefaultStartDir } from './utils/directoryPicker';
 // Sessions keyed by PID
 const sessions = new Map<number, ClaudeSession & { conversation?: ConversationEntry[] }>();
 
+// Maps JSONL file path → PID for direct session lookup (avoids workDir ambiguity)
+const fileToSession = new Map<string, number>();
+
 let panel: ClaudeMonitorPanel;
 let statusBar: ClaudeStatusBar;
 let processMonitor: ProcessMonitor;
@@ -59,6 +62,8 @@ function handleProcessUpdate(processes: ProcessInfo[]): void {
       // Register workDir mapping for FileWatcher
       if (proc.workDir) {
         fileWatcher.registerWorkDir(proc.workDir);
+        // Associate the most recently created unclaimed JSONL file with this session
+        associateJsonlFile(proc.pid, proc.workDir);
       }
     }
   }
@@ -75,6 +80,10 @@ function handleProcessUpdate(processes: ProcessInfo[]): void {
   for (const [pid, session] of sessions) {
     if (session.status === 'stopped' && now - session.lastActivity.getTime() > 30000) {
       sessions.delete(pid);
+      // Remove file associations for this pid
+      for (const [filePath, mappedPid] of fileToSession) {
+        if (mappedPid === pid) fileToSession.delete(filePath);
+      }
     }
   }
 
@@ -82,49 +91,119 @@ function handleProcessUpdate(processes: ProcessInfo[]): void {
 }
 
 function handleFileActivity(activity: ClaudeFileActivity): void {
-  // Match by file path pattern: look for session whose workDir matches the JSONL location
-  // Claude stores projects in ~/.claude/projects/<encoded-workdir>/*.jsonl
-  // We match by checking if the file path contains the session's workDir
-
-  for (const [pid, session] of sessions) {
-    // Check if this JSONL file could belong to this session
-    // Simple heuristic: file path contains key parts of session workDir
-    const workDirParts = session.workDir.split(path.sep).filter(Boolean).slice(-2);  // last 2 segments
-    const filePathLower = activity.filePath.toLowerCase();
-
-    let isMatch = false;
-    if (workDirParts.length > 0) {
-      const pattern = workDirParts.join('').toLowerCase().replace(/[_-]/g, '');
-      const encodedPart = filePathLower.split('.claude/projects/')[1];
-      if (encodedPart) {
-        const encoded = encodedPart.split('/')[0].replace(/[_-]/g, '');
-        isMatch = encoded.includes(pattern) || pattern.includes(encoded);
-      }
-    }
-
-    // Fallback: use inferWorkDir result if available
-    if (!isMatch && activity.workDir) {
-      const activityPath = path.resolve(activity.workDir);
-      const sessionPath = path.resolve(session.workDir);
-      isMatch = sessionPath === activityPath || sessionPath.startsWith(activityPath + path.sep);
-    }
-
-    if (isMatch) {
-      // Derive status from last JSONL entry role
-      let newStatus = session.status;
-      if (session.status !== 'stopped') {
-        if (activity.lastEntryRole === 'user') {
-          newStatus = 'thinking';   // Claude received user input → now processing
-        } else if (activity.lastEntryRole === 'assistant') {
-          newStatus = 'waiting';    // Claude replied → awaiting next instruction
-        }
-      }
-      (session as any).conversation = activity.entries;
-      sessions.set(pid, { ...session, status: newStatus, lastActivity: activity.updatedAt });
-      break;
+  // 1. Direct lookup: JSONL file already associated with a specific session
+  const directPid = fileToSession.get(activity.filePath);
+  if (directPid !== undefined) {
+    const session = sessions.get(directPid);
+    if (session) {
+      updateSessionFromActivity(directPid, session, activity);
+      broadcastUpdate();
+      return;
     }
   }
+
+  // 2. Exact workDir match (using cwd from JSONL entries)
+  const exactMatches: number[] = [];
+  if (activity.workDir) {
+    for (const [pid, session] of sessions) {
+      if (isWorkDirMatch(activity.workDir, session.workDir)) {
+        exactMatches.push(pid);
+      }
+    }
+  }
+
+  if (exactMatches.length === 1) {
+    // Unambiguous — associate and update
+    const pid = exactMatches[0];
+    fileToSession.set(activity.filePath, pid);
+    updateSessionFromActivity(pid, sessions.get(pid)!, activity);
+  } else if (exactMatches.length > 1) {
+    // Multiple sessions in same workDir — associate with the one not yet mapped to any file
+    const unclaimed = exactMatches.filter(
+      pid => !Array.from(fileToSession.values()).includes(pid)
+    );
+    const targetPid = unclaimed[0] ?? exactMatches[exactMatches.length - 1];
+    fileToSession.set(activity.filePath, targetPid);
+    updateSessionFromActivity(targetPid, sessions.get(targetPid)!, activity);
+  } else {
+    // 3. Fallback: loose heuristic match
+    for (const [pid, session] of sessions) {
+      if (looseWorkDirMatch(activity.filePath, session.workDir)) {
+        fileToSession.set(activity.filePath, pid);
+        updateSessionFromActivity(pid, session, activity);
+        break;
+      }
+    }
+  }
+
   broadcastUpdate();
+}
+
+function updateSessionFromActivity(
+  pid: number,
+  session: ClaudeSession & { conversation?: ConversationEntry[] },
+  activity: ClaudeFileActivity
+): void {
+  let newStatus = session.status;
+  if (session.status !== 'stopped') {
+    if (activity.lastEntryRole === 'user') {
+      newStatus = 'thinking';
+    } else if (activity.lastEntryRole === 'assistant') {
+      newStatus = 'waiting';
+    }
+  }
+  (session as any).conversation = activity.entries;
+  sessions.set(pid, { ...session, status: newStatus, lastActivity: activity.updatedAt });
+}
+
+/**
+ * Find the most recently modified JSONL file in the session's project dir
+ * that is not yet claimed by another session, and associate it with this PID.
+ * Uses Claude's simple path encoding: /home/user/foo → -home-user-foo
+ */
+function associateJsonlFile(pid: number, workDir: string): void {
+  const homeDir = process.env['HOME'] ?? '/root';
+  const projectsDir = path.join(homeDir, '.claude', 'projects');
+  const encoded = '-' + workDir.slice(1).replace(/[/_]/g, '-');
+  const projectDir = path.join(projectsDir, encoded);
+
+  if (!fs.existsSync(projectDir)) return;
+
+  try {
+    const claimedFiles = new Set(fileToSession.keys());
+    const unclaimed = fs.readdirSync(projectDir)
+      .filter(f => f.endsWith('.jsonl'))
+      .map(f => {
+        const filePath = path.join(projectDir, f);
+        return { filePath, mtime: fs.statSync(filePath).mtimeMs };
+      })
+      .sort((a, b) => b.mtime - a.mtime)
+      .find(f => !claimedFiles.has(f.filePath));
+
+    if (unclaimed) {
+      fileToSession.set(unclaimed.filePath, pid);
+    }
+  } catch { /* ignore */ }
+}
+
+/** Exact workDir comparison (preferred when cwd is extracted from JSONL). */
+function isWorkDirMatch(activityWorkDir: string, sessionWorkDir: string): boolean {
+  if (!activityWorkDir || !sessionWorkDir) return false;
+  return path.resolve(activityWorkDir) === path.resolve(sessionWorkDir);
+}
+
+/** Loose heuristic match using encoded path segments (fallback only). */
+function looseWorkDirMatch(filePath: string, sessionWorkDir: string): boolean {
+  if (!sessionWorkDir) return false;
+  const workDirParts = sessionWorkDir.split(path.sep).filter(Boolean).slice(-3); // last 3 segments
+  if (workDirParts.length === 0) return false;
+  const pattern = workDirParts.join('').toLowerCase().replace(/[_-]/g, '');
+  const filePathLower = filePath.toLowerCase();
+  const encodedPart = filePathLower.split('.claude/projects/')[1];
+  if (!encodedPart) return false;
+  const encoded = encodedPart.split('/')[0].replace(/[_-]/g, '');
+  // Only match if pattern is contained in encoded (not the other way around to avoid short-path false positives)
+  return encoded.includes(pattern);
 }
 
 function killProcess(pid: number): void {
