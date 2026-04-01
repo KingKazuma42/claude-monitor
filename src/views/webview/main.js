@@ -280,7 +280,6 @@ function formatRelative(d) {
 function statusLabel(status) {
   switch (status) {
     case 'thinking':   return '考え中...';
-    case 'running':    return '実行中...';
     case 'permission': return '承認待ち';
     case 'waiting':    return '入力待ち';
     case 'idle':       return 'アイドル';

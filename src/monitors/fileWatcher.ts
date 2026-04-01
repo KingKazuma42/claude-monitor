@@ -20,7 +20,7 @@ export interface ClaudeFileActivity {
   filePath: string;
   entries: ConversationEntry[];
   /** Derived status from last meaningful JSONL entry. */
-  derivedStatus: 'thinking' | 'running' | 'permission' | 'waiting' | null;
+  derivedStatus: 'thinking' | 'permission' | 'waiting' | null;
   updatedAt: Date;
 }
 
@@ -129,7 +129,7 @@ export class FileWatcher extends EventEmitter {
    *   permission - Claude called a tool but is waiting for user approval
    *   waiting    - Claude finished responding (end_turn), waiting for next message
    */
-  private deriveStatus(lines: string[]): 'thinking' | 'running' | 'permission' | 'waiting' | null {
+  private deriveStatus(lines: string[]): 'thinking' | 'permission' | 'waiting' | null {
     for (let i = lines.length - 1; i >= 0; i--) {
       const line = lines[i].trim();
       if (!line) continue;
@@ -171,7 +171,7 @@ export class FileWatcher extends EventEmitter {
         return 'thinking';  // regular user message
       }
 
-      if (obj.type === 'progress') return 'running';  // tool actively executing
+      if (obj.type === 'progress') return 'permission';  // hook executing (treat same as permission)
       if (obj.type === 'system') return 'waiting';    // e.g. compaction complete
     }
 
