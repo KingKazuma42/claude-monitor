@@ -4,6 +4,10 @@
   "description": "Monitor and control multiple Claude Code CLI instances from VSCode",
   "version": "0.2.0",
   "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/KingKazuma42/claude-monitor.git"
+  },
   "engines": {
     "vscode": "^1.74.0"
   },
