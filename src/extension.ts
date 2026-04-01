@@ -144,13 +144,9 @@ function updateSessionFromActivity(
   session: ClaudeSession & { conversation?: ConversationEntry[] },
   activity: ClaudeFileActivity
 ): void {
-  let newStatus = session.status;
-  if (session.status !== 'stopped') {
-    if (activity.lastEntryRole === 'user') {
-      newStatus = 'thinking';
-    } else if (activity.lastEntryRole === 'assistant') {
-      newStatus = 'waiting';
-    }
+  let newStatus: import('./models/claudeSession').SessionStatus = session.status;
+  if (session.status !== 'stopped' && activity.derivedStatus !== null) {
+    newStatus = activity.derivedStatus;
   }
   (session as any).conversation = activity.entries;
   sessions.set(pid, { ...session, status: newStatus, lastActivity: activity.updatedAt });

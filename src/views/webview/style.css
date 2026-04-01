@@ -62,6 +62,16 @@ body {
   animation: thinking-pulse 1s ease-in-out infinite;
 }
 
+.status-dot.running {
+  background: #2196f3;
+  animation: running-pulse 0.6s ease-in-out infinite;
+}
+
+.status-dot.permission {
+  background: #e040fb;
+  animation: permission-pulse 1.2s ease-in-out infinite;
+}
+
 .status-dot.waiting {
   background: #4caf50;
   box-shadow: 0 0 4px #4caf5088;
@@ -81,6 +91,16 @@ body {
   50%       { box-shadow: 0 0 0 5px rgba(255, 152, 0, 0); }
 }
 
+@keyframes running-pulse {
+  0%, 100% { box-shadow: 0 0 0 0 rgba(33, 150, 243, 0.6); }
+  50%       { box-shadow: 0 0 0 5px rgba(33, 150, 243, 0); }
+}
+
+@keyframes permission-pulse {
+  0%, 100% { box-shadow: 0 0 0 0 rgba(224, 64, 251, 0.7); }
+  50%       { box-shadow: 0 0 0 6px rgba(224, 64, 251, 0); }
+}
+
 /* ── Status Label ── */
 .status-label {
   font-size: 10px;
@@ -92,6 +112,16 @@ body {
 .status-label-thinking {
   background: rgba(255, 152, 0, 0.15);
   color: #ff9800;
+}
+
+.status-label-running {
+  background: rgba(33, 150, 243, 0.15);
+  color: #2196f3;
+}
+
+.status-label-permission {
+  background: rgba(224, 64, 251, 0.15);
+  color: #e040fb;
 }
 
 .status-label-waiting {
