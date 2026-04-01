@@ -6,6 +6,9 @@ import { EventEmitter } from 'events';
 /** Pattern matching system-injected context tags that should be excluded from conversation display. */
 const SYSTEM_TAG_PATTERN = /^<(ide_|system_reminder|antml_thinking|context_window)[a-z_]*/;
 
+/** Pattern matching !command output injected into the conversation by Claude Code CLI. */
+const LOCAL_COMMAND_OUTPUT_PATTERN = /^<(bash-input|bash-stdout|bash-stderr|local-command-caveat)>/;
+
 export interface ConversationEntry {
   role: 'user' | 'assistant';
   content: string;
@@ -16,8 +19,8 @@ export interface ClaudeFileActivity {
   workDir: string;
   filePath: string;
   entries: ConversationEntry[];
-  /** Role of the last entry: user → Claude is thinking, assistant → waiting for input */
-  lastEntryRole: 'user' | 'assistant' | null;
+  /** Derived status from last meaningful JSONL entry. */
+  derivedStatus: 'thinking' | 'permission' | 'waiting' | null;
   updatedAt: Date;
 }
 
@@ -102,12 +105,11 @@ export class FileWatcher extends EventEmitter {
       const entries = this.parseJsonlLines(lines);
       const workDir = cwd || this.inferWorkDir(uri.fsPath);
 
-      const lastEntry = entries[entries.length - 1] ?? null;
       const activity: ClaudeFileActivity = {
         workDir,
         filePath: uri.fsPath,
         entries,
-        lastEntryRole: lastEntry?.role ?? null,
+        derivedStatus: this.deriveStatus(lines),
         updatedAt: new Date(),
       };
 
@@ -115,6 +117,65 @@ export class FileWatcher extends EventEmitter {
     } catch {
       // Ignore read errors (file may be locked during write)
     }
+  }
+
+  /**
+   * Derive Claude's current status by scanning JSONL lines from the end,
+   * skipping non-meaningful entries (meta, sidechain, file snapshots, queue ops).
+   *
+   * Status semantics:
+   *   thinking   - Claude is generating a text response
+   *   running    - A tool/command is actively executing (progress entries present)
+   *   permission - Claude called a tool but is waiting for user approval
+   *   waiting    - Claude finished responding (end_turn), waiting for next message
+   */
+  private deriveStatus(lines: string[]): 'thinking' | 'permission' | 'waiting' | null {
+    for (let i = lines.length - 1; i >= 0; i--) {
+      const line = lines[i].trim();
+      if (!line) continue;
+
+      let obj: any;
+      try { obj = JSON.parse(line); } catch { continue; }
+
+      // Skip entries that don't reflect main session state
+      if (obj.type === 'file-history-snapshot') continue;
+      if (obj.type === 'queue-operation') continue;
+      if (obj.isMeta === true) continue;       // !command caveat messages
+      if (obj.isSidechain === true) continue;  // subagent messages
+
+      // Skip !command output injected into the conversation
+      // e.g. <bash-input>ls</bash-input>, <bash-stdout>...</bash-stdout>
+      if (obj.type === 'user') {
+        const content = obj.message?.content;
+        if (typeof content === 'string' && LOCAL_COMMAND_OUTPUT_PATTERN.test(content.trimStart())) {
+          continue;
+        }
+      }
+
+      if (obj.type === 'assistant') {
+        const stopReason = obj.message?.stop_reason;
+        if (stopReason === 'tool_use') {
+          // Tool was called — if the VERY next meaningful entry is also assistant or nothing,
+          // we're still waiting for permission. If progress follows, tool is running.
+          // Since we scan from end, reaching tool_use as the last means no progress yet.
+          return 'permission';
+        }
+        return 'waiting';  // end_turn or other stop reasons
+      }
+
+      if (obj.type === 'user') {
+        const content = obj.message?.content;
+        if (Array.isArray(content) && content.some((c: any) => c.type === 'tool_result')) {
+          return 'thinking';  // tool result returned, Claude will resume
+        }
+        return 'thinking';  // regular user message
+      }
+
+      if (obj.type === 'progress') return 'permission';  // hook executing (treat same as permission)
+      if (obj.type === 'system') return 'waiting';    // e.g. compaction complete
+    }
+
+    return null;
   }
 
   /** Extract the cwd field from JSONL lines (first entry that has it). */

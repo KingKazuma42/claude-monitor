@@ -1,6 +1,6 @@
 import * as vscode from 'vscode';
 
-export type SessionStatus = 'thinking' | 'waiting' | 'idle' | 'stopped';
+export type SessionStatus = 'thinking' | 'permission' | 'waiting' | 'idle' | 'stopped';
 
 export interface ClaudeSession {
   id: string;
