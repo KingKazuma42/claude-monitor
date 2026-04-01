@@ -3,6 +3,9 @@ import * as fs from 'fs';
 import * as path from 'path';
 import { EventEmitter } from 'events';
 
+/** Pattern matching system-injected context tags that should be excluded from conversation display. */
+const SYSTEM_TAG_PATTERN = /^<(ide_|system_reminder|antml_thinking|context_window)[a-z_]*/;
+
 export interface ConversationEntry {
   role: 'user' | 'assistant';
   content: string;
@@ -94,8 +97,10 @@ export class FileWatcher extends EventEmitter {
 
   private handleChange(uri: vscode.Uri): void {
     try {
-      const entries = this.readJsonlFile(uri.fsPath);
-      const workDir = this.inferWorkDir(uri.fsPath);
+      const lines = fs.readFileSync(uri.fsPath, 'utf-8').trim().split('\n');
+      const cwd = this.extractCwdFromLines(lines);
+      const entries = this.parseJsonlLines(lines);
+      const workDir = cwd || this.inferWorkDir(uri.fsPath);
 
       const lastEntry = entries[entries.length - 1] ?? null;
       const activity: ClaudeFileActivity = {
@@ -112,18 +117,36 @@ export class FileWatcher extends EventEmitter {
     }
   }
 
+  /** Extract the cwd field from JSONL lines (first entry that has it). */
+  private extractCwdFromLines(lines: string[]): string {
+    for (const line of lines) {
+      if (!line.trim()) continue;
+      try {
+        const obj = JSON.parse(line);
+        if (obj.cwd && typeof obj.cwd === 'string') {
+          return obj.cwd;
+        }
+      } catch { /* skip */ }
+    }
+    return '';
+  }
+
   readJsonlFile(filePath: string): ConversationEntry[] {
-    const content = fs.readFileSync(filePath, 'utf-8');
+    const lines = fs.readFileSync(filePath, 'utf-8').trim().split('\n');
+    return this.parseJsonlLines(lines);
+  }
+
+  private parseJsonlLines(lines: string[]): ConversationEntry[] {
     const entries: ConversationEntry[] = [];
 
-    for (const line of content.trim().split('\n')) {
+    for (const line of lines) {
       if (!line.trim()) continue;
       try {
         const obj = JSON.parse(line);
         const msgContent = obj.message?.content ?? obj.content;
         const role = this.getMessageRole(obj);
         if (role === 'user') {
-          const text = this.extractText(msgContent);
+          const text = this.extractText(msgContent, /* skipTools */ false, /* skipIdeContext */ true);
           if (text) entries.push({
             role: 'user',
             content: text,
@@ -160,15 +183,23 @@ export class FileWatcher extends EventEmitter {
     return null;
   }
 
-  private extractText(value: unknown, skipTools = false): string {
+  private extractText(value: unknown, skipTools = false, skipIdeContext = false): string {
     if (typeof value === 'string') return value.trim();
     if (Array.isArray(value)) {
       return value
         .filter(item => {
-          if (!skipTools) return true;
+          if (!item || typeof item !== 'object') return true;
           // Skip tool_use / tool_result blocks in assistant messages
-          return !(item && typeof item === 'object' && 'type' in item &&
-            (item.type === 'tool_use' || item.type === 'tool_result'));
+          if (skipTools && 'type' in item &&
+              (item.type === 'tool_use' || item.type === 'tool_result')) {
+            return false;
+          }
+          // Skip IDE-injected context blocks in user messages
+          if (skipIdeContext && 'text' in item) {
+            const text = String(item.text).trimStart();
+            if (SYSTEM_TAG_PATTERN.test(text)) return false;
+          }
+          return true;
         })
         .map(item => {
           if (typeof item === 'string') return item;
