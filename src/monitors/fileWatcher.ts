@@ -2,6 +2,7 @@ import * as vscode from 'vscode';
 import * as fs from 'fs';
 import * as path from 'path';
 import { EventEmitter } from 'events';
+import { CONTEXT_WINDOW_LIMIT, extractContextPct } from '../utils/contextPct';
 
 /** Pattern matching system-injected context tags that should be excluded from conversation display. */
 const SYSTEM_TAG_PATTERN = /^<(ide_|system_reminder|antml_thinking|context_window)[a-z_]*/;
@@ -18,9 +19,12 @@ export interface ConversationEntry {
 export interface ClaudeFileActivity {
   workDir: string;
   filePath: string;
+  sessionId?: string;
   entries: ConversationEntry[];
   /** Derived status from last meaningful JSONL entry. */
-  derivedStatus: 'thinking' | 'permission' | 'waiting' | null;
+  derivedStatus: 'thinking' | 'running' | 'permission' | 'waiting' | null;
+  /** Context window usage as percentage 0-100. undefined if no usage data found. */
+  contextPct?: number;
   updatedAt: Date;
 }
 
@@ -28,6 +32,11 @@ export class FileWatcher extends EventEmitter {
   private watchers: vscode.FileSystemWatcher[] = [];
   private workDirCache = new Map<string, string>();
   private workDirReverseMap = new Map<string, string>();  // encoded -> realPath
+  private contextWindowLimit = CONTEXT_WINDOW_LIMIT;
+
+  setContextWindowLimit(limit: number): void {
+    this.contextWindowLimit = limit > 0 ? limit : CONTEXT_WINDOW_LIMIT;
+  }
 
   /**
    * Register a known workDir to build reverse mapping for path decoding.
@@ -100,22 +109,39 @@ export class FileWatcher extends EventEmitter {
 
   private handleChange(uri: vscode.Uri): void {
     try {
-      const lines = fs.readFileSync(uri.fsPath, 'utf-8').trim().split('\n');
-      const cwd = this.extractCwdFromLines(lines);
-      const entries = this.parseJsonlLines(lines);
-      const workDir = cwd || this.inferWorkDir(uri.fsPath);
-
-      const activity: ClaudeFileActivity = {
-        workDir,
-        filePath: uri.fsPath,
-        entries,
-        derivedStatus: this.deriveStatus(lines),
-        updatedAt: new Date(),
-      };
+      const activity = this.readActivity(uri.fsPath, new Date());
+      if (!activity) {
+        return;
+      }
 
       this.emit('activity', activity);
     } catch {
       // Ignore read errors (file may be locked during write)
+    }
+  }
+
+  readActivity(filePath: string, updatedAt = new Date()): ClaudeFileActivity | null {
+    try {
+      const content = fs.readFileSync(filePath, 'utf-8').trim();
+      if (!content) {
+        return null;
+      }
+      const lines = content.split('\n');
+      const cwd = this.extractCwdFromLines(lines);
+      const entries = this.parseJsonlLines(lines);
+      const workDir = cwd || this.inferWorkDir(filePath);
+
+      return {
+        workDir,
+        filePath,
+        sessionId: this.extractSessionId(lines, filePath),
+        entries,
+        derivedStatus: this.deriveStatus(lines),
+        contextPct: extractContextPct(lines, this.contextWindowLimit),
+        updatedAt,
+      };
+    } catch {
+      return null;
     }
   }
 
@@ -129,7 +155,7 @@ export class FileWatcher extends EventEmitter {
    *   permission - Claude called a tool but is waiting for user approval
    *   waiting    - Claude finished responding (end_turn), waiting for next message
    */
-  private deriveStatus(lines: string[]): 'thinking' | 'permission' | 'waiting' | null {
+  private deriveStatus(lines: string[]): 'thinking' | 'running' | 'permission' | 'waiting' | null {
     for (let i = lines.length - 1; i >= 0; i--) {
       const line = lines[i].trim();
       if (!line) continue;
@@ -171,12 +197,14 @@ export class FileWatcher extends EventEmitter {
         return 'thinking';  // regular user message
       }
 
-      if (obj.type === 'progress') return 'permission';  // hook executing (treat same as permission)
+      if (obj.type === 'progress') return 'running';
       if (obj.type === 'system') return 'waiting';    // e.g. compaction complete
     }
 
     return null;
   }
+
+  // extractContextPct is now the pure utility function imported from '../utils/contextPct'.
 
   /** Extract the cwd field from JSONL lines (first entry that has it). */
   private extractCwdFromLines(lines: string[]): string {
@@ -192,9 +220,39 @@ export class FileWatcher extends EventEmitter {
     return '';
   }
 
+  private extractSessionId(lines: string[], filePath: string): string | undefined {
+    for (const line of lines) {
+      if (!line.trim()) continue;
+      try {
+        const obj = JSON.parse(line);
+        if (obj.sessionId && typeof obj.sessionId === 'string') {
+          return obj.sessionId;
+        }
+      } catch {
+        // Skip malformed lines
+      }
+    }
+
+    if (path.extname(filePath) !== '.jsonl') {
+      return undefined;
+    }
+
+    const baseName = path.basename(filePath, '.jsonl');
+    return /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(baseName)
+      ? baseName
+      : undefined;
+  }
+
   readJsonlFile(filePath: string): ConversationEntry[] {
-    const lines = fs.readFileSync(filePath, 'utf-8').trim().split('\n');
-    return this.parseJsonlLines(lines);
+    try {
+      const content = fs.readFileSync(filePath, 'utf-8').trim();
+      if (!content) {
+        return [];
+      }
+      return this.parseJsonlLines(content.split('\n'));
+    } catch {
+      return [];
+    }
   }
 
   private parseJsonlLines(lines: string[]): ConversationEntry[] {

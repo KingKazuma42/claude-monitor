@@ -1,5 +1,6 @@
 import * as vscode from 'vscode';
 import { EventEmitter } from 'events';
+import { buildClaudeCliArgs } from '../utils/claudeCliArgs';
 
 export interface TerminalInfo {
   terminal: vscode.Terminal;
@@ -71,6 +72,21 @@ export class TerminalManager extends EventEmitter {
   }
 
   /**
+   * Send a raw VT input sequence to the active terminal.
+   * This works better for interactive pickers than sendText(), which behaves like paste.
+   */
+  async sendSequence(terminal: vscode.Terminal, text: string): Promise<void> {
+    terminal.show(false);
+
+    try {
+      await vscode.commands.executeCommand('workbench.action.terminal.sendSequence', { text });
+    } catch {
+      const normalized = text.replace(/\r$/, '');
+      terminal.sendText(normalized, true);
+    }
+  }
+
+  /**
    * Send text to terminal by PID
    */
   sendTextToPid(pid: number, text: string): boolean {
@@ -85,28 +101,28 @@ export class TerminalManager extends EventEmitter {
    * @param workDir Working directory
    * @param model Optional --model flag value (e.g. "claude-opus-4-5-20251001")
    * @param agent Optional --agent flag value (e.g. "reviewer")
+   * @param sessionName Optional --name flag value shown in the monitor panel
    */
-  createClaudeTerminal(workDir?: string, model?: string, agent?: string): vscode.Terminal {
-    const args: string[] = [];
-    if (model) {
-      args.push(`--model ${model}`);
-    }
-    if (agent) {
-      args.push(`--agent ${agent}`);
-    }
+  createClaudeTerminal(workDir?: string, model?: string, agent?: string, sessionName?: string): vscode.Terminal {
+    const args = buildClaudeCliArgs({ model, agent, sessionName });
 
-    const cmd = args.length > 0 ? `claude ${args.join(' ')}` : 'claude';
-
+    // Terminal title: prefer user-supplied name, then fall back to model/agent hints
     let name = 'claude';
-    if (agent) {
+    if (sessionName) {
+      name = sessionName;
+    } else if (agent) {
       name = `claude (${agent})`;
     } else if (model) {
       name = `claude (${model.split('-').slice(1, 3).join('-')})`;
     }
 
-    const terminal = vscode.window.createTerminal({ name, cwd: workDir });
+    const terminal = vscode.window.createTerminal({
+      name,
+      cwd: workDir,
+      shellPath: 'claude',
+      shellArgs: args,
+    });
     terminal.show();
-    terminal.sendText(cmd, true);
     return terminal;
   }
 

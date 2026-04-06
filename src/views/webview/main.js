@@ -8,6 +8,9 @@ const expandedSessions = new Map();
 
 /** @type {any[]} */
 let currentSessions = [];
+/** @type {any[]} */
+let currentHistory = [];
+let historyExpanded = false;
 
 /**
  * Save input values and scroll positions before a re-render.
@@ -77,8 +80,9 @@ function restoreUiState(state) {
 /**
  * @param {any[]} sessions
  */
-function renderSessions(sessions) {
+function renderSessions(sessions, history = []) {
   currentSessions = sessions;
+  currentHistory = history;
   const list = document.getElementById('session-list');
   if (!list) return;
 
@@ -94,7 +98,10 @@ function renderSessions(sessions) {
     return;
   }
 
-  list.innerHTML = sessions.map(session => renderSessionCard(session)).join('');
+  list.innerHTML = [
+    sessions.map(session => renderSessionCard(session)).join(''),
+    renderHistorySection(history),
+  ].join('');
 
   restoreUiState(uiState);
 
@@ -104,7 +111,14 @@ function renderSessions(sessions) {
       const id = /** @type {HTMLElement} */ (header).dataset.id;
       if (!id) return;
       expandedSessions.set(id, !expandedSessions.get(id));
-      renderSessions(currentSessions);
+      renderSessions(currentSessions, currentHistory);
+    });
+  });
+
+  list.querySelectorAll('.history-header').forEach(header => {
+    header.addEventListener('click', () => {
+      historyExpanded = !historyExpanded;
+      renderSessions(currentSessions, currentHistory);
     });
   });
 
@@ -121,6 +135,16 @@ function renderSessions(sessions) {
       e.stopPropagation();
       const id = /** @type {HTMLElement} */ (btn).dataset.id;
       vscode.postMessage({ type: 'killSession', sessionId: id });
+    });
+  });
+
+  list.querySelectorAll('.btn-approve, .btn-reject').forEach(btn => {
+    btn.addEventListener('click', e => {
+      e.stopPropagation();
+      const id = /** @type {HTMLElement} */ (btn).dataset.id;
+      const choice = /** @type {HTMLElement} */ (btn).dataset.choice;
+      if (!id || (choice !== 'yes' && choice !== 'no')) return;
+      vscode.postMessage({ type: 'approvePermission', sessionId: id, choice });
     });
   });
 
@@ -160,27 +184,34 @@ function renderSessionCard(session) {
   const cpuPct = Math.min(100, session.cpuPercent ?? 0);
   const memMB = session.memoryMB ?? 0;
   const isExternal = session.isExternal === true;
+  const isHistorical = session.isHistorical === true;
+  const stoppedAtStr = session.stoppedAt ? formatRelative(new Date(session.stoppedAt)) : '';
 
   const conversationHtml = buildConversationHtml(session.conversation ?? []);
 
-  const focusBtn = isExternal
+  const focusBtn = isExternal || isHistorical
     ? '' // 別ウィンドウはターミナルを直接開けないので非表示
     : `<button class="btn btn-focus" data-id="${session.id}">ターミナルを開く</button>`;
+  const approvalActions = '';
 
   return `
-    <div class="session-card ${expanded ? 'expanded' : ''}" data-id="${session.id}">
+    <div class="session-card ${expanded ? 'expanded' : ''} ${isHistorical ? 'historical' : ''}" data-id="${session.id}">
       <div class="session-header" data-id="${session.id}">
         <span class="status-dot ${statusClass}"></span>
         <span class="session-title">${escapeHtml(session.terminalName)}</span>
         ${isExternal ? '<span class="badge-external">別ウィンドウ</span>' : ''}
+        ${isHistorical ? '<span class="badge-history">履歴</span>' : ''}
         <span class="session-pid">PID ${session.pid}</span>
         <span class="expand-icon">▶</span>
       </div>
       <div class="session-meta">
         <span class="meta-item" title="${escapeHtml(session.workDir)}">📁 ${escapeHtml(shortenPath(session.workDir))}</span>
         <span class="meta-item">🕐 ${lastActivityStr}</span>
+        ${stoppedAtStr ? `<span class="meta-item">⏹ ${stoppedAtStr} に停止</span>` : ''}
         <span class="status-label status-label-${statusClass}">${statusLabel(statusClass)}</span>
       </div>
+      ${(session.contextPct !== undefined && session.contextPct !== null) ? buildContextBarHtml(session.contextPct) : ''}
+      ${approvalActions}
       ${focusBtn ? `<div class="session-actions">${focusBtn}</div>` : ''}
       <div class="session-detail">
         <div class="detail-section">
@@ -195,7 +226,7 @@ function renderSessionCard(session) {
           <div class="resource-row">
             <span class="resource-label">MEM</span>
             <div class="resource-bar-track">
-              <div class="resource-bar-fill" style="width:${Math.min(100, memMB / 10)}%"></div>
+              <div class="resource-bar-fill" style="width:${Math.min(100, memMB / 10)}%;background:${memColor(memMB)}"></div>
             </div>
             <span class="resource-value">${memMB} MB</span>
           </div>
@@ -204,7 +235,7 @@ function renderSessionCard(session) {
           <div class="detail-label">会話</div>
           <div class="conversation" data-scroll-key="conv-${session.id}">${conversationHtml}</div>
         </div>
-        ${isExternal ? '' : `
+        ${isExternal || isHistorical ? '' : `
         <div class="detail-section">
           <div class="detail-label">指示を送る</div>
           <div class="instruction-form">
@@ -218,11 +249,67 @@ function renderSessionCard(session) {
           </div>
         </div>
         `}
-        <div class="detail-section detail-section-kill">
+        <div class="detail-section detail-section-kill ${isHistorical ? 'hidden-section' : ''}">
           <button class="btn danger btn-kill" data-id="${session.id}">セッションを終了 (Kill)</button>
         </div>
       </div>
     </div>`;
+}
+
+/**
+ * @param {any[]} history
+ */
+function renderHistorySection(history) {
+  if (!history.length) {
+    return '';
+  }
+
+  return `
+    <div class="history-section ${historyExpanded ? 'expanded' : ''}">
+      <div class="history-header">
+        <span class="history-title">過去のセッション (${history.length})</span>
+        <span class="expand-icon">▶</span>
+      </div>
+      <div class="history-body">
+        ${history.map(session => renderSessionCard(session)).join('')}
+      </div>
+    </div>`;
+}
+
+/**
+ * Build context window progress bar and warning HTML.
+ * @param {number} pct - usage percentage 0-100
+ */
+function buildContextBarHtml(pct) {
+  const colorClass = pct >= 90 ? 'ctx-danger'
+                   : pct >= 80 ? 'ctx-warning'
+                   : 'ctx-normal';
+  const warningHtml = buildContextWarningHtml(pct);
+  return `
+    <div class="session-ctx">
+      <div class="ctx-bar-track">
+        <div class="ctx-bar-fill ${colorClass}" style="width:${pct}%"></div>
+      </div>
+      <span class="ctx-pct ${colorClass}">${pct}%</span>
+    </div>
+    ${warningHtml}`;
+}
+
+/**
+ * Build a warning message when the context window is close to auto-compact.
+ * @param {number} pct - usage percentage 0-100
+ */
+function buildContextWarningHtml(pct) {
+  if (pct < 80) {
+    return '';
+  }
+
+  const warningClass = pct >= 90 ? 'ctx-alert-danger' : 'ctx-alert-warning';
+  const message = pct >= 90
+    ? 'コンテキスト使用率がかなり高いです。auto-compact が近いため、早めに会話を整理してください。'
+    : 'コンテキスト使用率が 80% を超えました。auto-compact 前に会話を整理することを推奨します。';
+
+  return `<div class="ctx-alert ${warningClass}">${message}</div>`;
 }
 
 /**
@@ -258,11 +345,9 @@ function escapeHtml(text) {
 /** @param {string} p */
 function shortenPath(p) {
   if (!p) return '(不明)';
-  const home = '/home/';
-  if (p.startsWith(home)) {
-    const rest = p.slice(home.length);
-    const slash = rest.indexOf('/');
-    if (slash !== -1) return '~/' + rest.slice(slash + 1);
+  const homeMatch = p.match(/^(?:\/home\/[^/]+|\/Users\/[^/]+|\/root)(\/.*)?$/);
+  if (homeMatch) {
+    return `~${homeMatch[1] ?? ''}`;
   }
   if (p.length > 40) return '...' + p.slice(-37);
   return p;
@@ -280,6 +365,7 @@ function formatRelative(d) {
 function statusLabel(status) {
   switch (status) {
     case 'thinking':   return '考え中...';
+    case 'running':    return '実行中...';
     case 'permission': return '承認待ち';
     case 'waiting':    return '入力待ち';
     case 'idle':       return 'アイドル';
@@ -295,14 +381,22 @@ function cpuColor(pct) {
   return '#4caf50';
 }
 
+/** @param {number} memMB */
+function memColor(memMB) {
+  if (memMB > 2048) return '#f44336';
+  if (memMB > 512) return '#ff9800';
+  return '#0e70c0';
+}
+
 // ── Message Handler ──
 window.addEventListener('message', event => {
   const msg = event.data;
   switch (msg.type) {
     case 'update':
-      renderSessions(msg.sessions);
+      renderSessions(msg.sessions, msg.history ?? []);
       break;
   }
 });
 
-renderSessions([]);
+renderSessions([], []);
+vscode.postMessage({ type: 'ready' });

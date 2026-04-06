@@ -26,8 +26,9 @@ function listSubdirs(dir: string): string[] {
 export async function pickDirectory(startDir: string): Promise<string | undefined> {
   let currentDir = path.resolve(startDir);
   const homeDir = os.homedir();
+  let isPicking = true;
 
-  while (true) {
+  while (isPicking) {
     const subdirs = listSubdirs(currentDir);
     const canGoUp = currentDir !== path.parse(currentDir).root;
 
@@ -76,6 +77,7 @@ export async function pickDirectory(startDir: string): Promise<string | undefine
     if (!picked) return undefined;  // Cancelled
 
     if (picked.label.startsWith('$(check)')) {
+      isPicking = false;
       return currentDir;
     } else if (picked.label.startsWith('$(arrow-up)')) {
       currentDir = path.dirname(currentDir);
@@ -84,6 +86,8 @@ export async function pickDirectory(startDir: string): Promise<string | undefine
       currentDir = path.join(currentDir, dirName);
     }
   }
+
+  return undefined;
 }
 
 /**

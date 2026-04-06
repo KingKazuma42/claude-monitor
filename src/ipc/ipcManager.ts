@@ -5,7 +5,7 @@ import { EventEmitter } from 'events';
 
 export interface IpcCommand {
   id: string;
-  type: 'sendText' | 'focus' | 'kill';
+  type: 'sendText' | 'sendSequence' | 'focus' | 'kill';
   targetPid: number;
   text?: string;
   status: 'pending' | 'done' | 'error';
@@ -30,8 +30,12 @@ export class IpcManager extends EventEmitter {
   private timer: NodeJS.Timeout | null = null;
   private ownedPids: Set<number> = new Set();
   private lastMtime = 0;
+  private pendingChecks: Set<NodeJS.Timeout> = new Set();
 
   start(): void {
+    if (this.timer) {
+      return;
+    }
     this.timer = setInterval(() => this.poll(), POLL_MS);
   }
 
@@ -40,6 +44,10 @@ export class IpcManager extends EventEmitter {
       clearInterval(this.timer);
       this.timer = null;
     }
+    for (const check of this.pendingChecks) {
+      clearInterval(check);
+    }
+    this.pendingChecks.clear();
   }
 
   setOwnedPids(pids: number[]): void {
@@ -69,16 +77,19 @@ export class IpcManager extends EventEmitter {
 
         if (!cmd || cmd.status === 'done') {
           clearInterval(check);
+          this.pendingChecks.delete(check);
           this.write(current.filter(c => c.id !== id));
           resolve(true);
           return;
         }
         if (Date.now() > deadline) {
           clearInterval(check);
+          this.pendingChecks.delete(check);
           this.write(current.filter(c => c.id !== id));
           resolve(false);
         }
       }, 100);
+      this.pendingChecks.add(check);
     });
   }
 
@@ -122,6 +133,8 @@ export class IpcManager extends EventEmitter {
   private write(commands: IpcCommand[]): void {
     const dir = path.dirname(IPC_FILE);
     if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
-    fs.writeFileSync(IPC_FILE, JSON.stringify(commands), 'utf-8');
+    const tempPath = `${IPC_FILE}.${process.pid}.tmp`;
+    fs.writeFileSync(tempPath, JSON.stringify(commands), 'utf-8');
+    fs.renameSync(tempPath, IPC_FILE);
   }
 }

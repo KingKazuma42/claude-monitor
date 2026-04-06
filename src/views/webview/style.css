@@ -62,6 +62,11 @@ body {
   animation: thinking-pulse 1s ease-in-out infinite;
 }
 
+.status-dot.running {
+  background: #2196f3;
+  animation: running-pulse 1s ease-in-out infinite;
+}
+
 .status-dot.permission {
   background: #e040fb;
   animation: permission-pulse 1.2s ease-in-out infinite;
@@ -91,6 +96,11 @@ body {
   50%       { box-shadow: 0 0 0 6px rgba(224, 64, 251, 0); }
 }
 
+@keyframes running-pulse {
+  0%, 100% { box-shadow: 0 0 0 0 rgba(33, 150, 243, 0.6); }
+  50%       { box-shadow: 0 0 0 5px rgba(33, 150, 243, 0); }
+}
+
 /* ── Status Label ── */
 .status-label {
   font-size: 10px;
@@ -102,6 +112,11 @@ body {
 .status-label-thinking {
   background: rgba(255, 152, 0, 0.15);
   color: #ff9800;
+}
+
+.status-label-running {
+  background: rgba(33, 150, 243, 0.15);
+  color: #64b5f6;
 }
 
 .status-label-permission {
@@ -147,6 +162,15 @@ body {
   white-space: nowrap;
 }
 
+.badge-history {
+  font-size: 9px;
+  padding: 1px 5px;
+  border-radius: 8px;
+  background: rgba(96, 125, 139, 0.15);
+  color: #90a4ae;
+  white-space: nowrap;
+}
+
 .expand-icon {
   font-size: 10px;
   color: var(--vscode-descriptionForeground);
@@ -179,6 +203,10 @@ body {
   display: flex;
   gap: 6px;
   padding: 0 10px 8px 26px;
+}
+
+.permission-actions {
+  padding-top: 2px;
 }
 
 .btn {
@@ -214,6 +242,11 @@ body {
   background: var(--vscode-inputValidation-errorBackground, #5a1d1d);
 }
 
+.btn-reject {
+  border-color: var(--vscode-inputValidation-warningBorder, #ff9800);
+  color: var(--vscode-inputValidation-warningForeground, #ffb74d);
+}
+
 .detail-section-kill {
   border-top: 1px solid var(--vscode-widget-border, #444);
   padding-top: 8px;
@@ -229,6 +262,14 @@ body {
 
 .session-card.expanded .session-detail {
   display: block;
+}
+
+.session-card.historical {
+  opacity: 0.92;
+}
+
+.hidden-section {
+  display: none;
 }
 
 .detail-section {
@@ -297,7 +338,7 @@ body {
 .resource-bar-track {
   flex: 1;
   height: 6px;
-  background: var(--vscode-progressBar-background, #333);
+  background: var(--vscode-sideBar-background, #2d2d2d);
   border-radius: 3px;
   overflow: hidden;
 }
@@ -358,6 +399,103 @@ body {
 .muted {
   color: var(--vscode-descriptionForeground);
   font-size: 11px;
+}
+
+/* ── Context Window Bar ── */
+.session-ctx {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 0 10px 8px 26px;
+}
+
+.ctx-bar-track {
+  flex: 1;
+  height: 4px;
+  background: var(--vscode-progressBar-background, #333);
+  border-radius: 2px;
+  overflow: hidden;
+}
+
+.ctx-bar-fill {
+  height: 100%;
+  border-radius: 2px;
+  transition: width 0.4s;
+}
+
+.ctx-bar-fill.ctx-normal  { background: #4caf50; }
+.ctx-bar-fill.ctx-warning { background: #ff9800; }
+.ctx-bar-fill.ctx-danger  { background: #f44336; }
+
+.ctx-pct {
+  font-size: 10px;
+  font-weight: 600;
+  width: 32px;
+  text-align: right;
+  flex-shrink: 0;
+}
+
+.ctx-pct.ctx-normal  { color: #4caf50; }
+.ctx-pct.ctx-warning { color: #ff9800; }
+.ctx-pct.ctx-danger  { color: #f44336; }
+
+.ctx-alert {
+  margin: -2px 10px 10px 26px;
+  padding: 8px 10px;
+  border-radius: 6px;
+  font-size: 11px;
+  line-height: 1.4;
+}
+
+.ctx-alert-warning {
+  background: color-mix(in srgb, #ff9800 18%, transparent);
+  color: #ffb74d;
+  border: 1px solid color-mix(in srgb, #ff9800 45%, transparent);
+}
+
+.ctx-alert-danger {
+  background: color-mix(in srgb, #f44336 18%, transparent);
+  color: #ef9a9a;
+  border: 1px solid color-mix(in srgb, #f44336 45%, transparent);
+}
+
+.history-section {
+  margin-top: 8px;
+  border: 1px solid var(--vscode-widget-border, #444);
+  border-radius: 4px;
+  overflow: hidden;
+}
+
+.history-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 8px 10px;
+  cursor: pointer;
+  background: var(--vscode-editor-background);
+}
+
+.history-header:hover {
+  background: var(--vscode-list-hoverBackground);
+}
+
+.history-title {
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.history-body {
+  display: none;
+  padding: 6px;
+  background: color-mix(in srgb, var(--vscode-editor-background) 85%, transparent);
+}
+
+.history-section.expanded .history-body {
+  display: block;
+}
+
+.history-section.expanded .history-header .expand-icon {
+  transform: rotate(90deg);
 }
 
 /* ── Scrollbar ── */
