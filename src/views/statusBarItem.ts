@@ -17,6 +17,7 @@ export class ClaudeStatusBar {
 
   update(sessions: ClaudeSession[]): void {
     const thinking   = sessions.filter(s => s.status === 'thinking').length;
+    const running    = sessions.filter(s => s.status === 'running').length;
     const permission = sessions.filter(s => s.status === 'permission').length;
     const waiting    = sessions.filter(s => s.status === 'waiting').length;
     const idle       = sessions.filter(s => s.status === 'idle').length;
@@ -27,8 +28,12 @@ export class ClaudeStatusBar {
       this.item.color = undefined;
     } else if (permission > 0) {
       this.item.text = `$(robot) Claude: ${permission} 承認待ち`;
+      if (running > 0) this.item.text += ` / ${running} 実行中`;
       if (thinking > 0) this.item.text += ` / ${thinking} 考え中`;
       this.item.color = new vscode.ThemeColor('statusBarItem.warningForeground');
+    } else if (running > 0) {
+      this.item.text = `$(robot) Claude: ${running} 実行中`;
+      this.item.color = new vscode.ThemeColor('statusBarItem.prominentForeground');
     } else if (thinking > 0) {
       this.item.text = `$(robot) Claude: ${thinking} 考え中`;
       this.item.color = new vscode.ThemeColor('statusBarItem.prominentForeground');

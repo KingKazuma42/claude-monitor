@@ -1,20 +1,36 @@
 import * as vscode from 'vscode';
 import * as path from 'path';
 import * as fs from 'fs';
+import * as os from 'os';
 import { ClaudeSession, createSession, updateSessionStatus } from './models/claudeSession';
 import { ProcessMonitor, ProcessInfo } from './monitors/processMonitor';
-import { FileWatcher, ClaudeFileActivity, ConversationEntry } from './monitors/fileWatcher';
+import { FileWatcher, ClaudeFileActivity } from './monitors/fileWatcher';
 import { TerminalManager } from './terminals/terminalManager';
 import { ClaudeMonitorPanel } from './views/claudeMonitorPanel';
 import { ClaudeStatusBar } from './views/statusBarItem';
 import { IpcManager, IpcCommand } from './ipc/ipcManager';
 import { pickDirectory, getDefaultStartDir } from './utils/directoryPicker';
+import { findActivityOwnerPid } from './utils/sessionRouting';
+import { CONTEXT_WINDOW_LIMIT } from './utils/contextPct';
+import { getPermissionReplySequence } from './utils/permissionInput';
+import {
+  getTranscriptPathForSession,
+  isRuntimeSessionMetadataConsistent,
+  readRuntimeSessionMetadata,
+} from './utils/runtimeSessionMetadata';
+import { SessionHistoryEntry } from './views/claudeMonitorPanel';
 
 // Sessions keyed by PID
-const sessions = new Map<number, ClaudeSession & { conversation?: ConversationEntry[] }>();
+const sessions = new Map<number, ClaudeSession>();
+const sessionHistory: SessionHistoryEntry[] = [];
+const MAX_SESSION_HISTORY = 10;
 
-// Maps JSONL file path → PID for direct session lookup (avoids workDir ambiguity)
-const fileToSession = new Map<string, number>();
+// Maps Claude session identity → PID for direct, collision-free routing.
+const sessionIdToPid = new Map<string, number>();
+const transcriptPathToPid = new Map<string, number>();
+const pendingActivityBySessionId = new Map<string, ClaudeFileActivity>();
+const pendingActivityByFilePath = new Map<string, ClaudeFileActivity>();
+const PENDING_ACTIVITY_TTL_MS = 60_000;
 
 let panel: ClaudeMonitorPanel;
 let statusBar: ClaudeStatusBar;
@@ -23,6 +39,8 @@ let fileWatcher: FileWatcher;
 let terminalManager: TerminalManager;
 let ipcManager: IpcManager;
 let messageDisposable: vscode.Disposable | undefined;
+let hasCleanedUp = false;
+let contextWarningThresholdPct = 90;
 
 function getSessions(): ClaudeSession[] {
   return Array.from(sessions.values());
@@ -30,7 +48,7 @@ function getSessions(): ClaudeSession[] {
 
 function broadcastUpdate(): void {
   const all = getSessions();
-  panel.update(all);
+  panel.update(disambiguateNames(all), sessionHistory);
   statusBar.update(all);
   // Tell IPC which PIDs we own (have terminals for in this window)
   ipcManager.setOwnedPids(
@@ -42,29 +60,94 @@ function handleProcessUpdate(processes: ProcessInfo[]): void {
   const seenPids = new Set(processes.map(p => p.pid));
 
   for (const proc of processes) {
+    const termInfo = terminalManager.getByPid(proc.pid) ?? terminalManager.getByPid(proc.ppid);
+    const metadata = readRuntimeSessionMetadata(proc.pid);
+    const runtimeSession = metadata && isRuntimeSessionMetadataConsistent(metadata, proc.workDir, proc.startedAt)
+      ? metadata
+      : undefined;
+    const runtimeWorkDir = runtimeSession?.cwd || proc.workDir;
+    const runtimeStartedAt = runtimeSession ? new Date(runtimeSession.startedAt) : undefined;
+    const transcriptPath = runtimeSession
+      ? getTranscriptPathForSession(runtimeSession.sessionId, runtimeWorkDir)
+      : undefined;
     const existing = sessions.get(proc.pid);
+    let nextSession: ClaudeSession;
     if (existing) {
-      sessions.set(proc.pid, {
+      const previousSessionId = existing.claudeSessionId;
+      const previousTranscriptPath = existing.transcriptPath;
+      if (
+        previousSessionId !== runtimeSession?.sessionId ||
+        previousTranscriptPath !== transcriptPath
+      ) {
+        clearIdentityMappingsForPid(proc.pid);
+      }
+
+      nextSession = {
         ...existing,
+        terminal: existing.terminal ?? termInfo?.terminal,
         cpuPercent: proc.cpu,
         memoryMB: proc.memMB,
-        workDir: proc.workDir || existing.workDir,
+        workDir: runtimeWorkDir || existing.workDir,
+        claudeSessionId: runtimeSession?.sessionId ?? existing.claudeSessionId,
+        transcriptPath: transcriptPath ?? existing.transcriptPath,
+        startedAt: runtimeStartedAt ?? existing.startedAt,
         // Preserve file-based status (thinking/waiting); only reset stopped → idle
         status: existing.status === 'stopped' ? 'idle' : existing.status,
-      });
+      };
     } else {
       // Terminal PID = shell (bash/zsh). Claude's PPID = shell PID, so check both.
-      const termInfo = terminalManager.getByPid(proc.pid) ?? terminalManager.getByPid(proc.ppid);
-      const session = createSession(proc.pid, proc.workDir, termInfo?.terminal);
-      (session as any).conversation = [];
-      sessions.set(proc.pid, { ...session, cpuPercent: proc.cpu, memoryMB: proc.memMB });
-
-      // Register workDir mapping for FileWatcher
-      if (proc.workDir) {
-        fileWatcher.registerWorkDir(proc.workDir);
-        // Associate the most recently created unclaimed JSONL file with this session
-        associateJsonlFile(proc.pid, proc.workDir);
+      const session = createSession(proc.pid, runtimeWorkDir, termInfo?.terminal);
+      // If the process was started with `claude --name <name>` / `claude -n <name>`,
+      // use that name so the user's chosen label is visible in the panel.
+      if (proc.sessionName) {
+        session.terminalName = proc.sessionName;
       }
+      if (runtimeStartedAt) {
+        session.startedAt = runtimeStartedAt;
+        session.lastActivity = runtimeStartedAt;
+      }
+      nextSession = {
+        ...session,
+        conversation: [],
+        cpuPercent: proc.cpu,
+        memoryMB: proc.memMB,
+        claudeSessionId: runtimeSession?.sessionId,
+        transcriptPath,
+      };
+    }
+
+    if (runtimeWorkDir) {
+      fileWatcher.registerWorkDir(runtimeWorkDir);
+    }
+
+    if (nextSession.transcriptPath) {
+      const pending = nextSession.claudeSessionId ? pendingActivityBySessionId.get(nextSession.claudeSessionId) : undefined;
+      const pendingByPath = pendingActivityByFilePath.get(nextSession.transcriptPath);
+      if (pending) {
+        nextSession = buildSessionFromActivity(nextSession, pending);
+        pendingActivityBySessionId.delete(nextSession.claudeSessionId!);
+        pendingActivityByFilePath.delete(pending.filePath);
+      } else if (pendingByPath) {
+        nextSession = buildSessionFromActivity(nextSession, pendingByPath);
+        pendingActivityByFilePath.delete(nextSession.transcriptPath!);
+      } else if ((nextSession.conversation?.length ?? 0) === 0) {
+        const hydrated = fileWatcher.readActivity(nextSession.transcriptPath);
+        if (hydrated) {
+          nextSession = buildSessionFromActivity(nextSession, hydrated);
+        }
+      }
+    }
+
+    if (nextSession.claudeSessionId) {
+      sessionIdToPid.set(nextSession.claudeSessionId, proc.pid);
+    }
+    if (nextSession.transcriptPath) {
+      transcriptPathToPid.set(nextSession.transcriptPath, proc.pid);
+    }
+
+    sessions.set(proc.pid, nextSession);
+    if (existing) {
+      notifySessionTransitions(existing, nextSession);
     }
   }
 
@@ -77,13 +160,13 @@ function handleProcessUpdate(processes: ProcessInfo[]): void {
 
   // Prune stopped sessions older than 30s
   const now = Date.now();
+  prunePendingActivities(now);
   for (const [pid, session] of sessions) {
     if (session.status === 'stopped' && now - session.lastActivity.getTime() > 30000) {
+      pushSessionHistory(session);
+      clearPendingActivitiesForSession(session);
       sessions.delete(pid);
-      // Remove file associations for this pid
-      for (const [filePath, mappedPid] of fileToSession) {
-        if (mappedPid === pid) fileToSession.delete(filePath);
-      }
+      clearIdentityMappingsForPid(pid);
     }
   }
 
@@ -91,115 +174,183 @@ function handleProcessUpdate(processes: ProcessInfo[]): void {
 }
 
 function handleFileActivity(activity: ClaudeFileActivity): void {
-  // 1. Direct lookup: JSONL file already associated with a specific session
-  const directPid = fileToSession.get(activity.filePath);
-  if (directPid !== undefined) {
-    const session = sessions.get(directPid);
-    if (session) {
-      updateSessionFromActivity(directPid, session, activity);
-      broadcastUpdate();
-      return;
+  const targetPid = findActivityOwnerPid(
+    activity,
+    getSessions().map(session => ({
+      pid: session.pid,
+      claudeSessionId: session.claudeSessionId,
+      transcriptPath: session.transcriptPath,
+      workDir: session.workDir,
+      status: session.status,
+    })),
+    sessionIdToPid,
+    transcriptPathToPid,
+  );
+
+  if (targetPid === undefined) {
+    if (activity.sessionId) {
+      pendingActivityBySessionId.set(activity.sessionId, activity);
     }
+    pendingActivityByFilePath.set(activity.filePath, activity);
+    return;
   }
 
-  // 2. Exact workDir match (using cwd from JSONL entries)
-  const exactMatches: number[] = [];
-  if (activity.workDir) {
-    for (const [pid, session] of sessions) {
-      if (isWorkDirMatch(activity.workDir, session.workDir)) {
-        exactMatches.push(pid);
-      }
+  const session = sessions.get(targetPid);
+  if (!session) {
+    if (activity.sessionId) {
+      pendingActivityBySessionId.set(activity.sessionId, activity);
     }
+    pendingActivityByFilePath.set(activity.filePath, activity);
+    return;
   }
 
-  if (exactMatches.length === 1) {
-    // Unambiguous — associate and update
-    const pid = exactMatches[0];
-    fileToSession.set(activity.filePath, pid);
-    updateSessionFromActivity(pid, sessions.get(pid)!, activity);
-  } else if (exactMatches.length > 1) {
-    // Multiple sessions in same workDir — associate with the one not yet mapped to any file
-    const unclaimed = exactMatches.filter(
-      pid => !Array.from(fileToSession.values()).includes(pid)
-    );
-    const targetPid = unclaimed[0] ?? exactMatches[exactMatches.length - 1];
-    fileToSession.set(activity.filePath, targetPid);
-    updateSessionFromActivity(targetPid, sessions.get(targetPid)!, activity);
-  } else {
-    // 3. Fallback: loose heuristic match
-    for (const [pid, session] of sessions) {
-      if (looseWorkDirMatch(activity.filePath, session.workDir)) {
-        fileToSession.set(activity.filePath, pid);
-        updateSessionFromActivity(pid, session, activity);
-        break;
-      }
-    }
+  if (activity.sessionId) {
+    sessionIdToPid.set(activity.sessionId, targetPid);
+    pendingActivityBySessionId.delete(activity.sessionId);
   }
+  transcriptPathToPid.set(activity.filePath, targetPid);
+  pendingActivityByFilePath.delete(activity.filePath);
+  const nextSession = buildSessionFromActivity(session, activity);
+  sessions.set(targetPid, nextSession);
+  notifySessionTransitions(session, nextSession);
 
   broadcastUpdate();
 }
 
-function updateSessionFromActivity(
-  pid: number,
-  session: ClaudeSession & { conversation?: ConversationEntry[] },
+function buildSessionFromActivity(
+  session: ClaudeSession,
   activity: ClaudeFileActivity
-): void {
+): ClaudeSession {
   let newStatus: import('./models/claudeSession').SessionStatus = session.status;
   if (session.status !== 'stopped' && activity.derivedStatus !== null) {
     newStatus = activity.derivedStatus;
   }
-  (session as any).conversation = activity.entries;
-  sessions.set(pid, { ...session, status: newStatus, lastActivity: activity.updatedAt });
+  return {
+    ...session,
+    conversation: activity.entries,
+    status: newStatus,
+    lastActivity: activity.updatedAt,
+    claudeSessionId: activity.sessionId ?? session.claudeSessionId,
+    transcriptPath: activity.filePath,
+    contextPct: activity.contextPct,
+  };
 }
 
 /**
- * Find the most recently modified JSONL file in the session's project dir
- * that is not yet claimed by another session, and associate it with this PID.
- * Uses Claude's simple path encoding: /home/user/foo → -home-user-foo
+ * Add `#1`, `#2` ... suffixes to sessions that share the same terminalName.
+ * Ordering is by PID ascending so the suffix is stable across re-renders.
+ * Sessions with a unique name are returned unchanged.
+ * This is applied only to the webview payload — the underlying session objects
+ * are not mutated.
  */
-function associateJsonlFile(pid: number, workDir: string): void {
-  const homeDir = process.env['HOME'] ?? '/root';
-  const projectsDir = path.join(homeDir, '.claude', 'projects');
-  const encoded = '-' + workDir.slice(1).replace(/[/_]/g, '-');
-  const projectDir = path.join(projectsDir, encoded);
+function disambiguateNames(sessions: ClaudeSession[]): ClaudeSession[] {
+  // Group by raw terminalName
+  const groups = new Map<string, ClaudeSession[]>();
+  for (const s of sessions) {
+    const list = groups.get(s.terminalName) ?? [];
+    list.push(s);
+    groups.set(s.terminalName, list);
+  }
 
-  if (!fs.existsSync(projectDir)) return;
+  return sessions.map(s => {
+    const group = groups.get(s.terminalName)!;
+    if (group.length <= 1) { return s; }
+    // Stable ordering: lowest PID first → #1
+    const sorted = [...group].sort((a, b) => a.pid - b.pid);
+    const rank = sorted.indexOf(s) + 1;
+    return { ...s, terminalName: `${s.terminalName} #${rank}` };
+  });
+}
 
-  try {
-    const claimedFiles = new Set(fileToSession.keys());
-    const unclaimed = fs.readdirSync(projectDir)
-      .filter(f => f.endsWith('.jsonl'))
-      .map(f => {
-        const filePath = path.join(projectDir, f);
-        return { filePath, mtime: fs.statSync(filePath).mtimeMs };
-      })
-      .sort((a, b) => b.mtime - a.mtime)
-      .find(f => !claimedFiles.has(f.filePath));
-
-    if (unclaimed) {
-      fileToSession.set(unclaimed.filePath, pid);
+function clearIdentityMappingsForPid(pid: number): void {
+  for (const [sessionId, mappedPid] of sessionIdToPid) {
+    if (mappedPid === pid) {
+      sessionIdToPid.delete(sessionId);
     }
-  } catch { /* ignore */ }
+  }
+  for (const [transcriptPath, mappedPid] of transcriptPathToPid) {
+    if (mappedPid === pid) {
+      transcriptPathToPid.delete(transcriptPath);
+    }
+  }
 }
 
-/** Exact workDir comparison (preferred when cwd is extracted from JSONL). */
-function isWorkDirMatch(activityWorkDir: string, sessionWorkDir: string): boolean {
-  if (!activityWorkDir || !sessionWorkDir) return false;
-  return path.resolve(activityWorkDir) === path.resolve(sessionWorkDir);
+function clearPendingActivitiesForSession(session: ClaudeSession): void {
+  if (session.claudeSessionId) {
+    pendingActivityBySessionId.delete(session.claudeSessionId);
+  }
+  if (session.transcriptPath) {
+    pendingActivityByFilePath.delete(session.transcriptPath);
+  }
 }
 
-/** Loose heuristic match using encoded path segments (fallback only). */
-function looseWorkDirMatch(filePath: string, sessionWorkDir: string): boolean {
-  if (!sessionWorkDir) return false;
-  const workDirParts = sessionWorkDir.split(path.sep).filter(Boolean).slice(-3); // last 3 segments
-  if (workDirParts.length === 0) return false;
-  const pattern = workDirParts.join('').toLowerCase().replace(/[_-]/g, '');
-  const filePathLower = filePath.toLowerCase();
-  const encodedPart = filePathLower.split('.claude/projects/')[1];
-  if (!encodedPart) return false;
-  const encoded = encodedPart.split('/')[0].replace(/[_-]/g, '');
-  // Only match if pattern is contained in encoded (not the other way around to avoid short-path false positives)
-  return encoded.includes(pattern);
+function pushSessionHistory(session: ClaudeSession): void {
+  sessionHistory.unshift({
+    ...session,
+    conversation: session.conversation ?? [],
+    stoppedAt: new Date(),
+  });
+
+  if (sessionHistory.length > MAX_SESSION_HISTORY) {
+    sessionHistory.length = MAX_SESSION_HISTORY;
+  }
+}
+
+function notifySessionTransitions(previous: ClaudeSession, next: ClaudeSession): void {
+  const config = vscode.workspace.getConfiguration('claudeMonitor');
+  const permissionNotificationsEnabled = config.get<boolean>('notifications.permission', true);
+  const contextNotificationsEnabled = config.get<boolean>('notifications.contextWarning', true);
+
+  if (permissionNotificationsEnabled && previous.status !== 'permission' && next.status === 'permission') {
+    void vscode.window.showWarningMessage(`${next.terminalName}: 承認待ちです`, 'パネルを開く')
+      .then(choice => {
+        if (choice === 'パネルを開く') {
+          void vscode.commands.executeCommand('claudeMonitor.focusPanel');
+        }
+      });
+  }
+
+  const previousPct = previous.contextPct ?? 0;
+  const nextPct = next.contextPct ?? 0;
+  if (contextNotificationsEnabled && previousPct < contextWarningThresholdPct && nextPct >= contextWarningThresholdPct) {
+    void vscode.window.showWarningMessage(
+      `${next.terminalName}: コンテキスト使用率が${contextWarningThresholdPct}%を超えました`
+    );
+  }
+}
+
+function applyConfiguration(config = vscode.workspace.getConfiguration('claudeMonitor')): void {
+  processMonitor?.setInterval(config.get<number>('pollIntervalMs', 5000));
+  fileWatcher?.setContextWindowLimit(config.get<number>('contextWindowTokens', CONTEXT_WINDOW_LIMIT));
+  contextWarningThresholdPct = Math.min(100, Math.max(1, config.get<number>('notifications.contextWarningThresholdPct', 90)));
+}
+
+function prunePendingActivities(now: number): void {
+  for (const [sessionId, activity] of pendingActivityBySessionId) {
+    if (now - activity.updatedAt.getTime() > PENDING_ACTIVITY_TTL_MS) {
+      pendingActivityBySessionId.delete(sessionId);
+    }
+  }
+
+  for (const [filePath, activity] of pendingActivityByFilePath) {
+    if (now - activity.updatedAt.getTime() > PENDING_ACTIVITY_TTL_MS) {
+      pendingActivityByFilePath.delete(filePath);
+    }
+  }
+}
+
+function cleanupResources(): void {
+  if (hasCleanedUp) {
+    return;
+  }
+
+  hasCleanedUp = true;
+  processMonitor?.stop();
+  fileWatcher?.stop();
+  terminalManager?.stop();
+  ipcManager?.stop();
+  statusBar?.dispose();
+  messageDisposable?.dispose();
 }
 
 function killProcess(pid: number): void {
@@ -214,7 +365,7 @@ function killProcess(pid: number): void {
  * Handle IPC commands sent by other VSCode window's claude-monitor instances.
  * Only called for PIDs that belong to a terminal in THIS window.
  */
-function handleIpcCommand(cmd: IpcCommand): void {
+async function handleIpcCommand(cmd: IpcCommand): Promise<void> {
   const session = getSessions().find(s => s.pid === cmd.targetPid);
   if (!session?.terminal) {
     // Shouldn't happen (IPC only dispatches for owned PIDs), but guard anyway
@@ -224,6 +375,9 @@ function handleIpcCommand(cmd: IpcCommand): void {
   switch (cmd.type) {
     case 'sendText':
       terminalManager.sendText(session.terminal, cmd.text ?? '');
+      break;
+    case 'sendSequence':
+      await terminalManager.sendSequence(session.terminal, cmd.text ?? '');
       break;
     case 'focus':
       terminalManager.focusTerminal(session.terminal);
@@ -238,6 +392,7 @@ function handleIpcCommand(cmd: IpcCommand): void {
 }
 
 export function activate(context: vscode.ExtensionContext): void {
+  hasCleanedUp = false;
   const cfg = vscode.workspace.getConfiguration('claudeMonitor');
   const pollInterval = cfg.get<number>('pollIntervalMs', 5000);
 
@@ -251,7 +406,11 @@ export function activate(context: vscode.ExtensionContext): void {
 
   // ── WebView provider ──
   context.subscriptions.push(
-    vscode.window.registerWebviewViewProvider(ClaudeMonitorPanel.viewId, panel)
+    vscode.window.registerWebviewViewProvider(
+      ClaudeMonitorPanel.viewId,
+      panel,
+      { webviewOptions: { retainContextWhenHidden: true } }
+    )
   );
 
   // ── Wire events ──
@@ -265,13 +424,14 @@ export function activate(context: vscode.ExtensionContext): void {
   terminalManager.on('open', () => broadcastUpdate());
   terminalManager.on('close', () => broadcastUpdate());
 
-  ipcManager.on('command', handleIpcCommand);
+  ipcManager.on('command', cmd => {
+    void handleIpcCommand(cmd);
+  });
 
   // ── Panel message handler ──
   // Register messages and send initial state when webview resolves
   panel.onDidResolve(() => {
     registerPanelMessages();
-    broadcastUpdate();
   });
 
   // ── Commands ──
@@ -293,7 +453,7 @@ export function activate(context: vscode.ExtensionContext): void {
         const picked = await vscode.window.showQuickPick(
           [
             ...folders.map(f => ({ label: `$(folder) ${f.name}`, description: f.uri.fsPath, fsPath: f.uri.fsPath })),
-            { label: '$(home) ホームディレクトリから選ぶ', description: require('os').homedir(), fsPath: require('os').homedir() },
+            { label: '$(home) ホームディレクトリから選ぶ', description: os.homedir(), fsPath: os.homedir() },
           ],
           { title: 'ルートディレクトリを選択', placeHolder: 'サブディレクトリはこの後選べます' }
         );
@@ -307,7 +467,15 @@ export function activate(context: vscode.ExtensionContext): void {
       const config = await pickModelAndAgent(workDir);
       if (config === null) return;
 
-      terminalManager.createClaudeTerminal(workDir, config.model, config.agent);
+      const sessionName = await vscode.window.showInputBox({
+        title: 'セッション名（任意）',
+        prompt: '識別しやすい名前を入力してください。空欄でスキップ。',
+        placeHolder: '例: backend, frontend, review など',
+      });
+      // null means the user cancelled the entire flow (Escape); '' means skipped
+      if (sessionName === undefined) return;
+
+      terminalManager.createClaudeTerminal(workDir, config.model, config.agent, sessionName || undefined);
     })
   );
 
@@ -316,16 +484,19 @@ export function activate(context: vscode.ExtensionContext): void {
   fileWatcher.start();
   terminalManager.start();
   ipcManager.start();
+  applyConfiguration(cfg);
 
   context.subscriptions.push(
-    new vscode.Disposable(() => {
-      processMonitor.stop();
-      fileWatcher.stop();
-      terminalManager.stop();
-      ipcManager.stop();
-      statusBar.dispose();
-      messageDisposable?.dispose();
-    })
+    vscode.workspace.onDidChangeConfiguration(event => {
+      if (
+        event.affectsConfiguration('claudeMonitor.pollIntervalMs') ||
+        event.affectsConfiguration('claudeMonitor.contextWindowTokens') ||
+        event.affectsConfiguration('claudeMonitor.notifications.contextWarningThresholdPct')
+      ) {
+        applyConfiguration();
+      }
+    }),
+    new vscode.Disposable(() => cleanupResources())
   );
 }
 
@@ -407,6 +578,31 @@ function registerPanelMessages(): void {
       case 'refresh':
         broadcastUpdate();
         break;
+
+      case 'ready':
+        panel.markReady();
+        broadcastUpdate();
+        break;
+
+      case 'approvePermission': {
+        if (!msg.sessionId || (msg.choice !== 'yes' && msg.choice !== 'no')) break;
+        const session = getSessions().find(s => s.id === msg.sessionId);
+        if (!session) break;
+
+        const sequence = getPermissionReplySequence(msg.choice);
+        if (session.terminal) {
+          await terminalManager.sendSequence(session.terminal, sequence);
+        } else {
+          const ok = await ipcManager.dispatch('sendSequence', session.pid, sequence);
+          if (!ok) {
+            vscode.window.showWarningMessage(
+              `PID ${session.pid} のセッションに接続できませんでした。` +
+              '別ウィンドウでも claude-monitor が起動しているか確認してください。'
+            );
+          }
+        }
+        break;
+      }
     }
   });
 }
@@ -535,10 +731,5 @@ async function pickModelAndAgent(workDir: string): Promise<{ model?: string; age
 }
 
 export function deactivate(): void {
-  processMonitor?.stop();
-  fileWatcher?.stop();
-  terminalManager?.stop();
-  ipcManager?.stop();
-  statusBar?.dispose();
-  messageDisposable?.dispose();
+  cleanupResources();
 }

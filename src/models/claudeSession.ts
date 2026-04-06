@@ -1,18 +1,23 @@
 import * as vscode from 'vscode';
+import type { ConversationEntry } from '../monitors/fileWatcher';
 
-export type SessionStatus = 'thinking' | 'permission' | 'waiting' | 'idle' | 'stopped';
+export type SessionStatus = 'thinking' | 'running' | 'permission' | 'waiting' | 'idle' | 'stopped';
 
 export interface ClaudeSession {
   id: string;
   pid: number;
   terminalName: string;
+  claudeSessionId?: string;
+  transcriptPath?: string;
   workDir: string;
   status: SessionStatus;
   startedAt: Date;
   lastActivity: Date;
   outputLog: string[];
+  conversation?: ConversationEntry[];
   cpuPercent?: number;
   memoryMB?: number;
+  contextPct?: number;
   terminal?: vscode.Terminal;
 }
 
@@ -33,12 +38,4 @@ export function createSession(pid: number, workDir: string, terminal?: vscode.Te
 
 export function updateSessionStatus(session: ClaudeSession, status: SessionStatus): ClaudeSession {
   return { ...session, status, lastActivity: new Date() };
-}
-
-export function appendLog(session: ClaudeSession, line: string, maxLines: number): ClaudeSession {
-  const outputLog = [...session.outputLog, line];
-  if (outputLog.length > maxLines) {
-    outputLog.splice(0, outputLog.length - maxLines);
-  }
-  return { ...session, outputLog, lastActivity: new Date() };
 }

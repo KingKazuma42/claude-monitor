@@ -5,4 +5,5 @@ src/**
 .gitignore
 **/*.map
 **/*.ts
+out/test/**
 node_modules/**

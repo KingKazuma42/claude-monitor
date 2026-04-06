@@ -1,6 +1,5 @@
 import * as vscode from 'vscode';
 import * as path from 'path';
-import * as fs from 'fs';
 import { ClaudeSession } from '../models/claudeSession';
 
 export class ClaudeMonitorPanel implements vscode.WebviewViewProvider {
@@ -9,6 +8,12 @@ export class ClaudeMonitorPanel implements vscode.WebviewViewProvider {
   private view?: vscode.WebviewView;
   private readonly extensionUri: vscode.Uri;
   private resolveCallbacks: Array<() => void> = [];
+  private latestPayload: { type: 'update'; sessions: unknown[]; history: unknown[] } = {
+    type: 'update',
+    sessions: [],
+    history: [],
+  };
+  private isReady = false;
 
   constructor(extensionUri: vscode.Uri) {
     this.extensionUri = extensionUri;
@@ -27,6 +32,7 @@ export class ClaudeMonitorPanel implements vscode.WebviewViewProvider {
     _token: vscode.CancellationToken
   ): void {
     this.view = webviewView;
+    this.isReady = false;
 
     webviewView.webview.options = {
       enableScripts: true,
@@ -41,6 +47,7 @@ export class ClaudeMonitorPanel implements vscode.WebviewViewProvider {
     // Clean up when disposed
     webviewView.onDidDispose(() => {
       this.view = undefined;
+      this.isReady = false;
     });
 
     // Notify listeners that the webview is now ready
@@ -52,9 +59,7 @@ export class ClaudeMonitorPanel implements vscode.WebviewViewProvider {
   /**
    * Called by the extension whenever session data changes
    */
-  update(sessions: ClaudeSession[]): void {
-    if (!this.view) return;
-
+  update(sessions: ClaudeSession[], history: SessionHistoryEntry[] = []): void {
     const payload = sessions.map(s => ({
       id: s.id,
       pid: s.pid,
@@ -66,11 +71,36 @@ export class ClaudeMonitorPanel implements vscode.WebviewViewProvider {
       outputLog: s.outputLog,
       cpuPercent: s.cpuPercent ?? 0,
       memoryMB: s.memoryMB ?? 0,
-      conversation: (s as any).conversation ?? [],
+      contextPct: s.contextPct,
+      conversation: s.conversation ?? [],
       isExternal: s.terminal === undefined,
     }));
 
-    this.view.webview.postMessage({ type: 'update', sessions: payload });
+    const historyPayload = history.map(s => ({
+      id: s.id,
+      pid: s.pid,
+      terminalName: s.terminalName,
+      workDir: s.workDir,
+      status: s.status,
+      startedAt: s.startedAt.toISOString(),
+      lastActivity: s.lastActivity.toISOString(),
+      stoppedAt: s.stoppedAt.toISOString(),
+      outputLog: s.outputLog,
+      cpuPercent: s.cpuPercent ?? 0,
+      memoryMB: s.memoryMB ?? 0,
+      contextPct: s.contextPct,
+      conversation: s.conversation ?? [],
+      isExternal: s.terminal === undefined,
+      isHistorical: true,
+    }));
+
+    this.latestPayload = { type: 'update', sessions: payload, history: historyPayload };
+    this.flushLatestPayload();
+  }
+
+  markReady(): void {
+    this.isReady = true;
+    this.flushLatestPayload();
   }
 
   /**
@@ -81,6 +111,14 @@ export class ClaudeMonitorPanel implements vscode.WebviewViewProvider {
       return { dispose: () => {} };
     }
     return this.view.webview.onDidReceiveMessage(handler);
+  }
+
+  private flushLatestPayload(): void {
+    if (!this.view || !this.isReady) {
+      return;
+    }
+
+    this.view.webview.postMessage(this.latestPayload);
   }
 
   private getHtml(webview: vscode.Webview): string {
@@ -116,9 +154,14 @@ export class ClaudeMonitorPanel implements vscode.WebviewViewProvider {
 }
 
 export interface WebviewMessage {
-  type: 'sendInstruction' | 'focusTerminal' | 'killSession' | 'refresh';
+  type: 'sendInstruction' | 'focusTerminal' | 'killSession' | 'refresh' | 'approvePermission' | 'ready';
   sessionId?: string;
   text?: string;
+  choice?: 'yes' | 'no';
+}
+
+export interface SessionHistoryEntry extends ClaudeSession {
+  stoppedAt: Date;
 }
 
 function getNonce(): string {
