@@ -95,13 +95,12 @@ function renderSessions(sessions, history = []) {
         ターミナルで <code>claude</code> を起動するか、<br>
         「+」ボタンで新しいセッションを作成してください。
       </div>`;
-    return;
+  } else {
+    list.innerHTML = [
+      sessions.map(session => renderSessionCard(session)).join(''),
+      renderHistorySection(history),
+    ].join('');
   }
-
-  list.innerHTML = [
-    sessions.map(session => renderSessionCard(session)).join(''),
-    renderHistorySection(history),
-  ].join('');
 
   restoreUiState(uiState);
 

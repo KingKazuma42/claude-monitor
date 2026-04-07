@@ -13,6 +13,7 @@ import { pickDirectory, getDefaultStartDir } from './utils/directoryPicker';
 import { findActivityOwnerPid } from './utils/sessionRouting';
 import { CONTEXT_WINDOW_LIMIT } from './utils/contextPct';
 import { getPermissionReplySequence } from './utils/permissionInput';
+import { parseLaunchEnvironment } from './utils/launchEnvironment';
 import {
   getTranscriptPathForSession,
   isRuntimeSessionMetadataConsistent,
@@ -325,6 +326,39 @@ function applyConfiguration(config = vscode.workspace.getConfiguration('claudeMo
   contextWarningThresholdPct = Math.min(100, Math.max(1, config.get<number>('notifications.contextWarningThresholdPct', 90)));
 }
 
+function getConfiguredLaunchEnvironment(): Record<string, string> | null | undefined {
+  const rawValue = vscode.workspace.getConfiguration('claudeMonitor').get<string>('launchEnvironment', '').trim();
+  if (!rawValue) {
+    return undefined;
+  }
+
+  try {
+    return parseLaunchEnvironment(rawValue);
+  } catch (error) {
+    void vscode.window.showErrorMessage(
+      `claudeMonitor.launchEnvironment の書式が不正です: ${(error as Error).message}`
+    );
+    return null;
+  }
+}
+
+async function editLaunchEnvironmentSetting(): Promise<void> {
+  const config = vscode.workspace.getConfiguration('claudeMonitor');
+  const currentValue = config.get<string>('launchEnvironment', '');
+  const nextValue = await vscode.window.showInputBox({
+    title: '起動時の環境変数',
+    prompt: 'KEY=value 形式で複数指定できます。空欄でクリアします。',
+    placeHolder: '例: CLAUDE_CODE_NO_FLICKER=1 LABEL="my value"',
+    value: currentValue,
+  });
+  if (nextValue === undefined) {
+    return;
+  }
+
+  await config.update('launchEnvironment', nextValue.trim(), vscode.ConfigurationTarget.Workspace);
+  broadcastUpdate();
+}
+
 function prunePendingActivities(now: number): void {
   for (const [sessionId, activity] of pendingActivityBySessionId) {
     if (now - activity.updatedAt.getTime() > PENDING_ACTIVITY_TTL_MS) {
@@ -444,6 +478,10 @@ export function activate(context: vscode.ExtensionContext): void {
       vscode.commands.executeCommand('claudeMonitor.panel.focus');
     }),
 
+    vscode.commands.registerCommand('claudeMonitor.editLaunchEnvironment', async () => {
+      await editLaunchEnvironmentSetting();
+    }),
+
     vscode.commands.registerCommand('claudeMonitor.newSession', async () => {
       // When multiple workspace folders exist, let the user pick the root first
       let startDir = getDefaultStartDir();
@@ -475,7 +513,16 @@ export function activate(context: vscode.ExtensionContext): void {
       // null means the user cancelled the entire flow (Escape); '' means skipped
       if (sessionName === undefined) return;
 
-      terminalManager.createClaudeTerminal(workDir, config.model, config.agent, sessionName || undefined);
+      const launchEnvironment = getConfiguredLaunchEnvironment();
+      if (launchEnvironment === null) return;
+
+      terminalManager.createClaudeTerminal(
+        workDir,
+        config.model,
+        config.agent,
+        sessionName || undefined,
+        launchEnvironment,
+      );
     })
   );
 
@@ -544,7 +591,9 @@ function registerPanelMessages(): void {
               '開く', 'キャンセル'
             );
             if (answer === '開く') {
-              terminalManager.createClaudeTerminal(session.workDir);
+              const launchEnvironment = getConfiguredLaunchEnvironment();
+              if (launchEnvironment === null) break;
+              terminalManager.createClaudeTerminal(session.workDir, undefined, undefined, undefined, launchEnvironment);
             }
           }
         }
