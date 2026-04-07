@@ -54,6 +54,12 @@
         "command": "claudeMonitor.focusPanel",
         "title": "Show Claude Monitor Panel",
         "category": "Claude Monitor"
+      },
+      {
+        "command": "claudeMonitor.editLaunchEnvironment",
+        "title": "Edit Launch Environment",
+        "icon": "$(gear)",
+        "category": "Claude Monitor"
       }
     ],
     "menus": {
@@ -65,6 +71,11 @@
         },
         {
           "command": "claudeMonitor.newSession",
+          "when": "view == claudeMonitor.panel",
+          "group": "navigation"
+        },
+        {
+          "command": "claudeMonitor.editLaunchEnvironment",
           "when": "view == claudeMonitor.panel",
           "group": "navigation"
         }
@@ -83,6 +94,11 @@
           "default": 200000,
           "minimum": 1,
           "description": "Token limit used to calculate context window usage percentage"
+        },
+        "claudeMonitor.launchEnvironment": {
+          "type": "string",
+          "default": "",
+          "markdownDescription": "Environment variables added when claude-monitor launches Claude. Use shell-style assignments such as `CLAUDE_CODE_NO_FLICKER=1 FOO=bar` or quote values with spaces like `LABEL=\"my value\"`."
         },
         "claudeMonitor.notifications.permission": {
           "type": "boolean",
@@ -110,7 +126,7 @@
     "watch": "tsc -watch -p ./",
     "package": "npx vsce package",
     "pretest": "npm run compile",
-    "test": "node out/test/claudeCliArgs.test.js && node out/test/contextPct.test.js && node out/test/disambiguateNames.test.js && node out/test/sessionRouting.test.js && node out/test/runtimeSessionMetadata.test.js && node out/test/sessionName.test.js && node out/test/permissionInput.test.js && node out/test/compact.test.js",
+    "test": "node out/test/claudeCliArgs.test.js && node out/test/contextPct.test.js && node out/test/disambiguateNames.test.js && node out/test/sessionRouting.test.js && node out/test/runtimeSessionMetadata.test.js && node out/test/sessionName.test.js && node out/test/permissionInput.test.js && node out/test/launchEnvironment.test.js && node out/test/compact.test.js",
     "lint": "eslint src --ext ts"
   },
   "devDependencies": {

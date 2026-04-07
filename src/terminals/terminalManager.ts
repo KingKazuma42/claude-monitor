@@ -102,8 +102,15 @@ export class TerminalManager extends EventEmitter {
    * @param model Optional --model flag value (e.g. "claude-opus-4-5-20251001")
    * @param agent Optional --agent flag value (e.g. "reviewer")
    * @param sessionName Optional --name flag value shown in the monitor panel
+   * @param environment Optional environment overrides applied to the launched terminal
    */
-  createClaudeTerminal(workDir?: string, model?: string, agent?: string, sessionName?: string): vscode.Terminal {
+  createClaudeTerminal(
+    workDir?: string,
+    model?: string,
+    agent?: string,
+    sessionName?: string,
+    environment?: Record<string, string>,
+  ): vscode.Terminal {
     const args = buildClaudeCliArgs({ model, agent, sessionName });
 
     // Terminal title: prefer user-supplied name, then fall back to model/agent hints
@@ -121,6 +128,7 @@ export class TerminalManager extends EventEmitter {
       cwd: workDir,
       shellPath: 'claude',
       shellArgs: args,
+      env: environment,
     });
     terminal.show();
     return terminal;
