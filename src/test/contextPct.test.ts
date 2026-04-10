@@ -7,7 +7,11 @@
  */
 
 import * as assert from 'assert';
-import { extractContextPct, CONTEXT_WINDOW_LIMIT } from '../utils/contextPct';
+import {
+  extractContextPct,
+  extractTranscriptContextUsage,
+  CONTEXT_WINDOW_LIMIT,
+} from '../utils/contextPct';
 
 // ─── helpers ────────────────────────────────────────────────────────────────
 
@@ -69,15 +73,34 @@ test('assistant entry with null usage returns undefined', () => {
   assert.strictEqual(extractContextPct([line]), undefined);
 });
 
-test('all token fields present — sums and rounds correctly', () => {
-  // input=100_000, cache_create=40_000, cache_read=20_000, output=20_000 → 180_000/200_000 = 90%
+test('output_tokens are excluded from context usage', () => {
+  // input=100_000, cache_create=40_000, cache_read=20_000, output=20_000 → 160_000/200_000 = 80%
   const line = assistantLine({
     input_tokens: 100_000,
     cache_creation_input_tokens: 40_000,
     cache_read_input_tokens: 20_000,
     output_tokens: 20_000,
   });
-  assert.strictEqual(extractContextPct([line]), 90);
+  assert.strictEqual(extractContextPct([line]), 80);
+});
+
+test('transcript context usage exposes used, limit, and remaining tokens', () => {
+  const line = assistantLine({
+    input_tokens: 120_000,
+    cache_creation_input_tokens: 10_000,
+    cache_read_input_tokens: 5_000,
+    output_tokens: 50_000,
+  });
+  const usage = extractTranscriptContextUsage([line]);
+  assert.ok(usage);
+  assert.deepStrictEqual(usage, {
+    usedTokens: 135_000,
+    limitTokens: CONTEXT_WINDOW_LIMIT,
+    remainingTokens: 65_000,
+    pct: 68,
+    source: 'transcript',
+    modelId: undefined,
+  });
 });
 
 test('only input_tokens set — other fields treated as 0', () => {

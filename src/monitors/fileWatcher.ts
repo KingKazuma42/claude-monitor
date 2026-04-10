@@ -2,7 +2,11 @@ import * as vscode from 'vscode';
 import * as fs from 'fs';
 import * as path from 'path';
 import { EventEmitter } from 'events';
-import { CONTEXT_WINDOW_LIMIT, extractContextPct } from '../utils/contextPct';
+import {
+  CONTEXT_WINDOW_LIMIT,
+  ContextWindowUsage,
+  extractTranscriptContextUsage,
+} from '../utils/contextPct';
 
 /** Pattern matching system-injected context tags that should be excluded from conversation display. */
 const SYSTEM_TAG_PATTERN = /^<(ide_|system_reminder|antml_thinking|context_window)[a-z_]*/;
@@ -23,6 +27,7 @@ export interface ClaudeFileActivity {
   entries: ConversationEntry[];
   /** Derived status from last meaningful JSONL entry. */
   derivedStatus: 'thinking' | 'running' | 'permission' | 'waiting' | null;
+  contextWindow?: ContextWindowUsage;
   /** Context window usage as percentage 0-100. undefined if no usage data found. */
   contextPct?: number;
   updatedAt: Date;
@@ -130,6 +135,7 @@ export class FileWatcher extends EventEmitter {
       const cwd = this.extractCwdFromLines(lines);
       const entries = this.parseJsonlLines(lines);
       const workDir = cwd || this.inferWorkDir(filePath);
+      const contextWindow = extractTranscriptContextUsage(lines, undefined, this.contextWindowLimit);
 
       return {
         workDir,
@@ -137,7 +143,8 @@ export class FileWatcher extends EventEmitter {
         sessionId: this.extractSessionId(lines, filePath),
         entries,
         derivedStatus: this.deriveStatus(lines),
-        contextPct: extractContextPct(lines, this.contextWindowLimit),
+        contextWindow,
+        contextPct: contextWindow?.pct,
         updatedAt,
       };
     } catch {
@@ -203,8 +210,6 @@ export class FileWatcher extends EventEmitter {
 
     return null;
   }
-
-  // extractContextPct is now the pure utility function imported from '../utils/contextPct'.
 
   /** Extract the cwd field from JSONL lines (first entry that has it). */
   private extractCwdFromLines(lines: string[]): string {

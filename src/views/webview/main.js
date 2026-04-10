@@ -11,6 +11,9 @@ let currentSessions = [];
 /** @type {any[]} */
 let currentHistory = [];
 let historyExpanded = false;
+let dashboardExpanded = false;
+let showUsageDashboard = true;
+const SESSION_WINDOW_MINUTES = 5 * 60;
 
 /**
  * Save input values and scroll positions before a re-render.
@@ -90,6 +93,7 @@ function renderSessions(sessions, history = []) {
 
   if (sessions.length === 0) {
     list.innerHTML = `
+      ${showUsageDashboard ? buildUsageDashboardHtml(sessions, history) : ''}
       <div class="empty-state">
         Claude Code セッションが見つかりません。<br>
         ターミナルで <code>claude</code> を起動するか、<br>
@@ -97,6 +101,7 @@ function renderSessions(sessions, history = []) {
       </div>`;
   } else {
     list.innerHTML = [
+      showUsageDashboard ? buildUsageDashboardHtml(sessions, history) : '',
       sessions.map(session => renderSessionCard(session)).join(''),
       renderHistorySection(history),
     ].join('');
@@ -117,6 +122,13 @@ function renderSessions(sessions, history = []) {
   list.querySelectorAll('.history-header').forEach(header => {
     header.addEventListener('click', () => {
       historyExpanded = !historyExpanded;
+      renderSessions(currentSessions, currentHistory);
+    });
+  });
+
+  list.querySelectorAll('.dashboard-header').forEach(header => {
+    header.addEventListener('click', () => {
+      dashboardExpanded = !dashboardExpanded;
       renderSessions(currentSessions, currentHistory);
     });
   });
@@ -174,6 +186,330 @@ function renderSessions(sessions, history = []) {
 }
 
 /**
+ * @param {any[]} sessions
+ * @param {any[]} history
+ */
+function buildUsageDashboardHtml(sessions, history) {
+  const summary = summarizeUsage(sessions, history);
+  const tightest = summary.tightestSession;
+  const tightestForecast = tightest ? describeSessionForecast(tightest) : null;
+
+  return `
+    <div class="dashboard-section ${dashboardExpanded ? 'expanded' : ''}">
+      <div class="dashboard-header">
+        <div class="dashboard-title-wrap">
+          <span class="dashboard-title">Dashboard</span>
+        </div>
+        <span class="expand-icon">▶</span>
+      </div>
+      <div class="dashboard-body">
+        <div class="dashboard-grid">
+          <div class="dashboard-card accent-blue">
+            <div class="dashboard-card-label">Active Sessions</div>
+            <div class="dashboard-card-value">${summary.activeSessions}</div>
+            <div class="dashboard-card-meta">稼働中 ${summary.nonStoppedSessions} / 履歴 ${history.length}</div>
+          </div>
+          <div class="dashboard-card accent-amber">
+            <div class="dashboard-card-label">Approval / Running</div>
+            <div class="dashboard-card-value">${summary.permissionSessions} / ${summary.runningSessions}</div>
+            <div class="dashboard-card-meta">承認待ち / 実行中</div>
+          </div>
+          <div class="dashboard-card accent-green">
+            <div class="dashboard-card-label">Avg Context</div>
+            <div class="dashboard-card-value">${summary.averageContextPct}%</div>
+            <div class="dashboard-card-meta">context データあり ${summary.sessionsWithContext} 件</div>
+          </div>
+          <div class="dashboard-card ${summary.tightestPct >= 90 ? 'accent-red' : 'accent-violet'}">
+            <div class="dashboard-card-label">Tightest Window</div>
+            <div class="dashboard-card-value">${tightest ? `${tightest.contextWindow?.pct ?? 0}%` : 'N/A'}</div>
+            <div class="dashboard-card-meta">${tightest ? `${escapeHtml(tightest.terminalName)} · 残り ${formatNumber(tightest.contextWindow?.remainingTokens ?? 0)}` : 'context データなし'}</div>
+          </div>
+        </div>
+        <div class="dashboard-panels">
+          <div class="dashboard-panel">
+            <div class="dashboard-panel-title">Context Overview</div>
+            <div class="dashboard-meter-row">
+              <div class="dashboard-meter-track">
+                <div class="dashboard-meter-fill ctx-normal" style="width:${summary.averageContextPct}%"></div>
+              </div>
+              <div class="dashboard-meter-value">平均 ${summary.averageContextPct}%</div>
+            </div>
+            <div class="dashboard-stats-row">
+              <span>合計使用 ${formatNumber(summary.totalUsedTokens)} tokens</span>
+              <span>合計残量 ${formatNumber(summary.totalRemainingTokens)} tokens</span>
+            </div>
+            <div class="dashboard-stats-row subdued">
+              <span>80% 以上 ${summary.highContextSessions} 件</span>
+              <span>90% 以上 ${summary.criticalContextSessions} 件</span>
+            </div>
+          </div>
+          <div class="dashboard-panel">
+            <div class="dashboard-panel-title">Session Forecast</div>
+            ${buildSessionForecastHtml(tightest, tightestForecast)}
+          </div>
+          <div class="dashboard-panel">
+            <div class="dashboard-panel-title">Source Coverage</div>
+            <div class="dashboard-source-pills">
+              <span class="ctx-source">hook ${summary.hookSessions}</span>
+              <span class="ctx-source">transcript ${summary.transcriptSessions}</span>
+              <span class="ctx-source">unknown ${summary.sessionsWithoutContext}</span>
+            </div>
+            <div class="dashboard-stats-row subdued">
+              <span>statusline 優先</span>
+              <span>fallback 利用状況を確認</span>
+            </div>
+          </div>
+          <div class="dashboard-panel">
+            <div class="dashboard-panel-title">Model Mix</div>
+            ${buildModelMixHtml(summary.modelDistribution)}
+          </div>
+        </div>
+        <div class="dashboard-panel ${summary.hotSessions.length ? '' : 'dashboard-panel-empty'}">
+          <div class="dashboard-panel-title">Hot Sessions</div>
+          ${summary.hotSessions.length ? summary.hotSessions.map(session => renderDashboardSessionRow(session)).join('') : '<div class="dashboard-empty">高負荷セッションはありません</div>'}
+        </div>
+      </div>
+    </div>`;
+}
+
+/**
+ * @param {any} session
+ */
+function renderDashboardSessionRow(session) {
+  const context = session.contextWindow ?? { pct: session.contextPct ?? 0 };
+  const pct = Math.max(0, Math.min(100, Number(context.pct ?? 0)));
+  const sourceLabel = context.source === 'statusline-hook' ? 'hook' : 'transcript';
+  const forecast = describeSessionForecast(session);
+
+  return `
+    <div class="dashboard-session-row">
+      <div class="dashboard-session-main">
+        <div class="dashboard-session-title">${escapeHtml(session.terminalName)}</div>
+        <div class="dashboard-session-meta">${statusLabel(session.status)} · ${escapeHtml(shortenPath(session.workDir))}</div>
+      </div>
+      <div class="dashboard-session-usage">
+        <div class="dashboard-mini-track">
+          <div class="dashboard-mini-fill ${pct >= 90 ? 'ctx-danger' : pct >= 80 ? 'ctx-warning' : 'ctx-normal'}" style="width:${pct}%"></div>
+        </div>
+        <div class="dashboard-session-values">
+          <span>${pct}%</span>
+          <span>${typeof context.remainingTokens === 'number' ? `残り ${formatNumber(context.remainingTokens)}` : '残量不明'}</span>
+          <span class="ctx-source">${sourceLabel}</span>
+          ${forecast ? `<span class="dashboard-inline-stat">${forecast.burnRateTokensPerMinute > 0 ? `${forecast.burnRateTokensPerMinute.toFixed(0)} tok/min` : '静止中'}</span>` : ''}
+        </div>
+      </div>
+    </div>`;
+}
+
+/**
+ * @param {any[]} sessions
+ * @param {any[]} history
+ */
+function summarizeUsage(sessions, history) {
+  const activeSessions = sessions.filter(session => session.isHistorical !== true);
+  const nonStoppedSessions = activeSessions.filter(session => session.status !== 'stopped');
+  const sessionsWithContext = activeSessions.filter(session => session.contextWindow || session.contextPct !== undefined);
+  const hookSessions = activeSessions.filter(session => session.contextWindow?.source === 'statusline-hook').length;
+  const transcriptSessions = activeSessions.filter(session => session.contextWindow?.source === 'transcript').length;
+  const permissionSessions = nonStoppedSessions.filter(session => session.status === 'permission').length;
+  const runningSessions = nonStoppedSessions.filter(session => session.status === 'running').length;
+  const totalUsedTokens = sessionsWithContext.reduce((sum, session) => sum + Number(session.contextWindow?.usedTokens ?? 0), 0);
+  const totalRemainingTokens = sessionsWithContext.reduce((sum, session) => sum + Number(session.contextWindow?.remainingTokens ?? 0), 0);
+  const averageContextPct = sessionsWithContext.length
+    ? Math.round(sessionsWithContext.reduce((sum, session) => sum + Number(session.contextWindow?.pct ?? session.contextPct ?? 0), 0) / sessionsWithContext.length)
+    : 0;
+  const tightestSession = [...sessionsWithContext]
+    .filter(session => typeof session.contextWindow?.remainingTokens === 'number')
+    .sort((left, right) => Number(left.contextWindow.remainingTokens) - Number(right.contextWindow.remainingTokens))[0];
+  const tightestPct = Number(tightestSession?.contextWindow?.pct ?? tightestSession?.contextPct ?? 0);
+  const highContextSessions = sessionsWithContext.filter(session => Number(session.contextWindow?.pct ?? session.contextPct ?? 0) >= 80).length;
+  const criticalContextSessions = sessionsWithContext.filter(session => Number(session.contextWindow?.pct ?? session.contextPct ?? 0) >= 90).length;
+  const hotSessions = [...sessionsWithContext]
+    .sort((left, right) => Number(right.contextWindow?.pct ?? right.contextPct ?? 0) - Number(left.contextWindow?.pct ?? left.contextPct ?? 0))
+    .slice(0, 3);
+  const modelDistribution = summarizeModelDistribution(activeSessions);
+
+  return {
+    activeSessions: activeSessions.length,
+    nonStoppedSessions: nonStoppedSessions.length,
+    sessionsWithContext: sessionsWithContext.length,
+    sessionsWithoutContext: Math.max(0, activeSessions.length - sessionsWithContext.length),
+    permissionSessions,
+    runningSessions,
+    totalUsedTokens,
+    totalRemainingTokens,
+    averageContextPct,
+    hookSessions,
+    transcriptSessions,
+    tightestSession,
+    tightestPct,
+    highContextSessions,
+    criticalContextSessions,
+    hotSessions,
+    modelDistribution,
+    historySessions: history.length,
+  };
+}
+
+/**
+ * @param {any} session
+ */
+function describeSessionForecast(session) {
+  if (!session?.startedAt) {
+    return null;
+  }
+
+  const startedAt = new Date(session.startedAt);
+  if (Number.isNaN(startedAt.getTime())) {
+    return null;
+  }
+
+  const elapsedMinutes = Math.max(0, (Date.now() - startedAt.getTime()) / 60000);
+  const remainingSessionMinutes = Math.max(0, SESSION_WINDOW_MINUTES - elapsedMinutes);
+  const sessionProgressPct = Math.min(100, Math.max(0, Math.round((elapsedMinutes / SESSION_WINDOW_MINUTES) * 100)));
+  const usedTokens = Number(session.contextWindow?.usedTokens ?? 0);
+  const remainingTokens = typeof session.contextWindow?.remainingTokens === 'number'
+    ? Number(session.contextWindow.remainingTokens)
+    : undefined;
+  const burnRateTokensPerMinute = usedTokens > 0 && elapsedMinutes > 1 ? usedTokens / elapsedMinutes : 0;
+  const minutesToCompact = burnRateTokensPerMinute > 0 && remainingTokens !== undefined
+    ? remainingTokens / burnRateTokensPerMinute
+    : undefined;
+
+  return {
+    elapsedMinutes,
+    remainingSessionMinutes,
+    sessionProgressPct,
+    burnRateTokensPerMinute,
+    minutesToCompact,
+    resetAt: new Date(startedAt.getTime() + SESSION_WINDOW_MINUTES * 60000),
+    compactAt: minutesToCompact !== undefined ? new Date(Date.now() + minutesToCompact * 60000) : undefined,
+    willCompactBeforeReset: minutesToCompact !== undefined && minutesToCompact < remainingSessionMinutes,
+  };
+}
+
+/**
+ * @param {any | undefined} session
+ * @param {ReturnType<typeof describeSessionForecast> | null} forecast
+ */
+function buildSessionForecastHtml(session, forecast) {
+  if (!session || !forecast) {
+    return '<div class="dashboard-empty">予測に必要なセッションデータがありません</div>';
+  }
+
+  return `
+    <div class="dashboard-stats-row">
+      <span>${escapeHtml(session.terminalName)}</span>
+      <span>${formatDuration(forecast.remainingSessionMinutes)} で reset</span>
+    </div>
+    <div class="dashboard-meter-row">
+      <div class="dashboard-meter-track">
+        <div class="dashboard-meter-fill ctx-warning" style="width:${forecast.sessionProgressPct}%"></div>
+      </div>
+      <div class="dashboard-meter-value">${forecast.sessionProgressPct}%</div>
+    </div>
+    <div class="dashboard-stats-row subdued">
+      <span>Burn Rate ${forecast.burnRateTokensPerMinute > 0 ? `${forecast.burnRateTokensPerMinute.toFixed(1)} tok/min` : '0 tok/min'}</span>
+      <span>Reset ${formatClock(forecast.resetAt)}</span>
+    </div>
+    <div class="dashboard-prediction ${forecast.willCompactBeforeReset ? 'danger' : 'safe'}">
+      ${forecast.minutesToCompact !== undefined
+        ? (forecast.willCompactBeforeReset
+          ? `このペースなら ${formatDuration(forecast.minutesToCompact)} で compact 到達見込み`
+          : `現在ペースでは reset が先です (${formatClock(forecast.resetAt)})`)
+        : 'compact 予測に十分な履歴がありません'}
+    </div>`;
+}
+
+/**
+ * @param {{ segments: Array<{ label: string, pct: number, tokens: number, className: string }>, unknownCount: number }} distribution
+ */
+function buildModelMixHtml(distribution) {
+  if (!distribution.segments.length) {
+    return '<div class="dashboard-empty">model 情報がまだありません</div>';
+  }
+
+  return `
+    <div class="dashboard-model-track">
+      ${distribution.segments.map(segment => `<div class="dashboard-model-fill ${segment.className}" style="width:${segment.pct}%"></div>`).join('')}
+    </div>
+    <div class="dashboard-model-legend">
+      ${distribution.segments.map(segment => `<span class="dashboard-model-pill ${segment.className}">${segment.label} ${segment.pct}%</span>`).join('')}
+      ${distribution.unknownCount > 0 ? `<span class="dashboard-inline-stat">unknown ${distribution.unknownCount}</span>` : ''}
+    </div>`;
+}
+
+/**
+ * @param {any[]} sessions
+ */
+function summarizeModelDistribution(sessions) {
+  const buckets = new Map([
+    ['Sonnet', 0],
+    ['Opus', 0],
+    ['Haiku', 0],
+    ['Other', 0],
+  ]);
+  let unknownCount = 0;
+
+  sessions.forEach(session => {
+    const modelId = String(session.contextWindow?.modelId ?? '').toLowerCase();
+    const weight = Number(session.contextWindow?.usedTokens ?? 0);
+    if (!modelId) {
+      unknownCount += 1;
+      return;
+    }
+
+    if (modelId.includes('sonnet')) {
+      buckets.set('Sonnet', Number(buckets.get('Sonnet')) + weight);
+    } else if (modelId.includes('opus')) {
+      buckets.set('Opus', Number(buckets.get('Opus')) + weight);
+    } else if (modelId.includes('haiku')) {
+      buckets.set('Haiku', Number(buckets.get('Haiku')) + weight);
+    } else {
+      buckets.set('Other', Number(buckets.get('Other')) + weight);
+    }
+  });
+
+  const total = Array.from(buckets.values()).reduce((sum, value) => sum + Number(value), 0);
+  const classByLabel = {
+    Sonnet: 'model-sonnet',
+    Opus: 'model-opus',
+    Haiku: 'model-haiku',
+    Other: 'model-other',
+  };
+
+  const segments = Array.from(buckets.entries())
+    .filter(([, tokens]) => Number(tokens) > 0)
+    .map(([label, tokens]) => ({
+      label,
+      tokens: Number(tokens),
+      pct: total > 0 ? Math.round((Number(tokens) / total) * 100) : 0,
+      className: classByLabel[label],
+    }));
+
+  return { segments, unknownCount };
+}
+
+/** @param {number} minutes */
+function formatDuration(minutes) {
+  const safeMinutes = Math.max(0, Math.round(minutes));
+  const hours = Math.floor(safeMinutes / 60);
+  const mins = safeMinutes % 60;
+  if (hours <= 0) {
+    return `${mins}分`;
+  }
+  return `${hours}時間${mins}分`;
+}
+
+/** @param {Date | undefined} date */
+function formatClock(date) {
+  if (!date || Number.isNaN(date.getTime())) {
+    return '--:--';
+  }
+  return date.toLocaleTimeString('ja-JP', { hour: '2-digit', minute: '2-digit' });
+}
+
+/**
  * @param {any} session
  */
 function renderSessionCard(session) {
@@ -209,7 +545,7 @@ function renderSessionCard(session) {
         ${stoppedAtStr ? `<span class="meta-item">⏹ ${stoppedAtStr} に停止</span>` : ''}
         <span class="status-label status-label-${statusClass}">${statusLabel(statusClass)}</span>
       </div>
-      ${(session.contextPct !== undefined && session.contextPct !== null) ? buildContextBarHtml(session.contextPct) : ''}
+      ${session.contextWindow ? buildContextBarHtml(session.contextWindow) : ((session.contextPct !== undefined && session.contextPct !== null) ? buildContextBarHtml({ pct: session.contextPct }) : '')}
       ${approvalActions}
       ${focusBtn ? `<div class="session-actions">${focusBtn}</div>` : ''}
       <div class="session-detail">
@@ -277,13 +613,15 @@ function renderHistorySection(history) {
 
 /**
  * Build context window progress bar and warning HTML.
- * @param {number} pct - usage percentage 0-100
+ * @param {{ pct?: number, usedTokens?: number, limitTokens?: number, remainingTokens?: number, source?: string }} context
  */
-function buildContextBarHtml(pct) {
+function buildContextBarHtml(context) {
+  const pct = Math.max(0, Math.min(100, Number(context.pct ?? 0)));
   const colorClass = pct >= 90 ? 'ctx-danger'
                    : pct >= 80 ? 'ctx-warning'
                    : 'ctx-normal';
-  const warningHtml = buildContextWarningHtml(pct);
+  const detailHtml = buildContextDetailHtml(context, colorClass);
+  const warningHtml = buildContextWarningHtml(pct, context.remainingTokens);
   return `
     <div class="session-ctx">
       <div class="ctx-bar-track">
@@ -291,22 +629,49 @@ function buildContextBarHtml(pct) {
       </div>
       <span class="ctx-pct ${colorClass}">${pct}%</span>
     </div>
+    ${detailHtml}
     ${warningHtml}`;
+}
+
+/**
+ * @param {{ usedTokens?: number, limitTokens?: number, remainingTokens?: number, source?: string }} context
+ * @param {string} colorClass
+ */
+function buildContextDetailHtml(context, colorClass) {
+  if (typeof context.usedTokens !== 'number' || typeof context.limitTokens !== 'number') {
+    return '';
+  }
+
+  const remainingTokens = typeof context.remainingTokens === 'number'
+    ? context.remainingTokens
+    : Math.max(0, context.limitTokens - context.usedTokens);
+  const sourceLabel = context.source === 'statusline-hook' ? 'hook' : 'transcript';
+
+  return `
+    <div class="ctx-meta">
+      <span class="ctx-detail ${colorClass}">${formatNumber(context.usedTokens)} / ${formatNumber(context.limitTokens)}</span>
+      <span class="ctx-detail">残り ${formatNumber(remainingTokens)} tokens</span>
+      <span class="ctx-source">${sourceLabel}</span>
+    </div>`;
 }
 
 /**
  * Build a warning message when the context window is close to auto-compact.
  * @param {number} pct - usage percentage 0-100
+ * @param {number | undefined} remainingTokens
  */
-function buildContextWarningHtml(pct) {
+function buildContextWarningHtml(pct, remainingTokens) {
   if (pct < 80) {
     return '';
   }
 
   const warningClass = pct >= 90 ? 'ctx-alert-danger' : 'ctx-alert-warning';
+  const remainingText = typeof remainingTokens === 'number'
+    ? ` 残り ${formatNumber(Math.max(0, remainingTokens))} tokens です。`
+    : '';
   const message = pct >= 90
-    ? 'コンテキスト使用率がかなり高いです。auto-compact が近いため、早めに会話を整理してください。'
-    : 'コンテキスト使用率が 80% を超えました。auto-compact 前に会話を整理することを推奨します。';
+    ? `コンテキスト使用率がかなり高いです。auto-compact が近いため、早めに会話を整理してください。${remainingText}`
+    : `コンテキスト使用率が 80% を超えました。auto-compact 前に会話を整理することを推奨します。${remainingText}`;
 
   return `<div class="ctx-alert ${warningClass}">${message}</div>`;
 }
@@ -360,6 +725,11 @@ function formatRelative(d) {
   return `${Math.floor(diff / 3600000)}時間前`;
 }
 
+/** @param {number} value */
+function formatNumber(value) {
+  return Math.round(value).toLocaleString('ja-JP');
+}
+
 /** @param {string} status */
 function statusLabel(status) {
   switch (status) {
@@ -392,6 +762,7 @@ window.addEventListener('message', event => {
   const msg = event.data;
   switch (msg.type) {
     case 'update':
+      showUsageDashboard = msg.showUsageDashboard !== false;
       renderSessions(msg.sessions, msg.history ?? []);
       break;
   }
