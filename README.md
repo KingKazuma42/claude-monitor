@@ -57,12 +57,12 @@ npm run compile
 npm run package
 
 # Install the generated VSIX into VS Code
-code --install-extension claude-monitor-0.1.0.vsix
+code --install-extension claude-monitor-0.2.4.vsix
 ```
 
 Alternatively, use VS Code's command palette:
 - `Extensions: Install from VSIX...`
-- select `claude-monitor-0.1.0.vsix`
+- select `claude-monitor-0.2.4.vsix`
 
 ### Build
 

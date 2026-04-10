@@ -2,7 +2,7 @@
   "name": "claude-monitor",
   "displayName": "Claude Monitor",
   "description": "Monitor and control multiple Claude Code CLI instances from VSCode",
-  "version": "0.2.3",
+  "version": "0.2.4",
   "license": "MIT",
   "repository": {
     "type": "git",
