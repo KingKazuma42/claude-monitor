@@ -1,5 +1,6 @@
 import * as vscode from 'vscode';
 import type { ConversationEntry } from '../monitors/fileWatcher';
+import type { ContextWindowUsage } from '../utils/contextPct';
 
 export type SessionStatus = 'thinking' | 'running' | 'permission' | 'waiting' | 'idle' | 'stopped';
 
@@ -17,6 +18,7 @@ export interface ClaudeSession {
   conversation?: ConversationEntry[];
   cpuPercent?: number;
   memoryMB?: number;
+  contextWindow?: ContextWindowUsage;
   contextPct?: number;
   terminal?: vscode.Terminal;
 }

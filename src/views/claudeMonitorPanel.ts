@@ -8,10 +8,11 @@ export class ClaudeMonitorPanel implements vscode.WebviewViewProvider {
   private view?: vscode.WebviewView;
   private readonly extensionUri: vscode.Uri;
   private resolveCallbacks: Array<() => void> = [];
-  private latestPayload: { type: 'update'; sessions: unknown[]; history: unknown[] } = {
+  private latestPayload: { type: 'update'; sessions: unknown[]; history: unknown[]; showUsageDashboard: boolean } = {
     type: 'update',
     sessions: [],
     history: [],
+    showUsageDashboard: true,
   };
   private isReady = false;
 
@@ -60,6 +61,7 @@ export class ClaudeMonitorPanel implements vscode.WebviewViewProvider {
    * Called by the extension whenever session data changes
    */
   update(sessions: ClaudeSession[], history: SessionHistoryEntry[] = []): void {
+    const showUsageDashboard = vscode.workspace.getConfiguration('claudeMonitor').get<boolean>('showUsageDashboard', true);
     const payload = sessions.map(s => ({
       id: s.id,
       pid: s.pid,
@@ -71,7 +73,8 @@ export class ClaudeMonitorPanel implements vscode.WebviewViewProvider {
       outputLog: s.outputLog,
       cpuPercent: s.cpuPercent ?? 0,
       memoryMB: s.memoryMB ?? 0,
-      contextPct: s.contextPct,
+      contextWindow: s.contextWindow,
+      contextPct: s.contextWindow?.pct ?? s.contextPct,
       conversation: s.conversation ?? [],
       isExternal: s.terminal === undefined,
     }));
@@ -88,13 +91,14 @@ export class ClaudeMonitorPanel implements vscode.WebviewViewProvider {
       outputLog: s.outputLog,
       cpuPercent: s.cpuPercent ?? 0,
       memoryMB: s.memoryMB ?? 0,
-      contextPct: s.contextPct,
+      contextWindow: s.contextWindow,
+      contextPct: s.contextWindow?.pct ?? s.contextPct,
       conversation: s.conversation ?? [],
       isExternal: s.terminal === undefined,
       isHistorical: true,
     }));
 
-    this.latestPayload = { type: 'update', sessions: payload, history: historyPayload };
+    this.latestPayload = { type: 'update', sessions: payload, history: historyPayload, showUsageDashboard };
     this.flushLatestPayload();
   }
 

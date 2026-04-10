@@ -12,10 +12,13 @@ This extension discovers local Claude Code terminals, watches `.claude/projects/
 
 - Detects local Claude sessions in terminals
 - Monitors Claude Code JSONL output files
+- Prefers Claude Code statusline context snapshots when available
+- Shows an accordion dashboard with context pressure and source coverage
 - Shows session status (`thinking`, `waiting`, `idle`, `stopped`)
 - Sends instructions to sessions
 - Focuses terminals and kills sessions
 - Supports IPC across VS Code windows for non-local sessions
+- Delays permission popups so short auto-accept transitions do not notify unnecessarily
 
 ## Getting Started
 
@@ -72,6 +75,14 @@ npm run compile
 
 - Press `F5` in VS Code to launch the extension in a new Extension Development Host window.
 - Open the `Claude Monitor` activity bar view.
+
+### Optional: install the statusline bridge
+
+To let `claude-monitor` use Claude Code's `context_window` data directly, open `Claude Monitor: Settings` from the panel gear or the command palette, then choose the Statusline Bridge action.
+
+This installs a small script under `~/.claude/claude-monitor/` and updates `~/.claude/settings.json` so Claude Code writes per-session status snapshots that `claude-monitor` can read.
+
+The dashboard can also be toggled from `Claude Monitor: Settings` or via the `claudeMonitor.showUsageDashboard` setting.
 
 ## Security and Privacy
 

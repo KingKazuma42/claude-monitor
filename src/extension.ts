@@ -14,6 +14,7 @@ import { findActivityOwnerPid } from './utils/sessionRouting';
 import { CONTEXT_WINDOW_LIMIT } from './utils/contextPct';
 import { getPermissionReplySequence } from './utils/permissionInput';
 import { parseLaunchEnvironment } from './utils/launchEnvironment';
+import { getStatuslineSnapshotDir, readStatuslineContextUsage } from './utils/statuslineSnapshot';
 import {
   getTranscriptPathForSession,
   isRuntimeSessionMetadataConsistent,
@@ -42,6 +43,13 @@ let ipcManager: IpcManager;
 let messageDisposable: vscode.Disposable | undefined;
 let hasCleanedUp = false;
 let contextWarningThresholdPct = 90;
+let permissionNotificationDelayMs = 1500;
+
+const pendingPermissionNotifications = new Map<string, NodeJS.Timeout>();
+
+const STATUSLINE_BRIDGE_DIR = path.join(os.homedir(), '.claude', 'claude-monitor');
+const STATUSLINE_BRIDGE_SCRIPT = path.join(STATUSLINE_BRIDGE_DIR, 'statusline-bridge.js');
+const CLAUDE_SETTINGS_PATH = path.join(os.homedir(), '.claude', 'settings.json');
 
 function getSessions(): ClaudeSession[] {
   return Array.from(sessions.values());
@@ -55,6 +63,68 @@ function broadcastUpdate(): void {
   ipcManager.setOwnedPids(
     all.filter(s => s.terminal !== undefined).map(s => s.pid)
   );
+}
+
+function getPermissionNotificationKey(session: Pick<ClaudeSession, 'id'>): string {
+  return session.id;
+}
+
+function clearPermissionNotification(session: Pick<ClaudeSession, 'id'>): void {
+  const key = getPermissionNotificationKey(session);
+  const handle = pendingPermissionNotifications.get(key);
+  if (!handle) {
+    return;
+  }
+
+  clearTimeout(handle);
+  pendingPermissionNotifications.delete(key);
+}
+
+function schedulePermissionNotification(session: ClaudeSession): void {
+  clearPermissionNotification(session);
+
+  const key = getPermissionNotificationKey(session);
+  const handle = setTimeout(() => {
+    pendingPermissionNotifications.delete(key);
+
+    const latestSession = sessions.get(session.pid);
+    if (!latestSession || latestSession.status !== 'permission') {
+      return;
+    }
+
+    void vscode.window.showWarningMessage(`${latestSession.terminalName}: 承認待ちです`, 'パネルを開く')
+      .then(choice => {
+        if (choice === 'パネルを開く') {
+          void vscode.commands.executeCommand('claudeMonitor.focusPanel');
+        }
+      });
+  }, Math.max(0, permissionNotificationDelayMs));
+
+  pendingPermissionNotifications.set(key, handle);
+}
+
+function clearAllPermissionNotifications(): void {
+  for (const handle of pendingPermissionNotifications.values()) {
+    clearTimeout(handle);
+  }
+  pendingPermissionNotifications.clear();
+}
+
+function applyPreferredContextWindow(session: ClaudeSession): ClaudeSession {
+  if (!session.claudeSessionId) {
+    return session;
+  }
+
+  const contextWindow = readStatuslineContextUsage(session.claudeSessionId);
+  if (!contextWindow) {
+    return session;
+  }
+
+  return {
+    ...session,
+    contextWindow,
+    contextPct: contextWindow.pct,
+  };
 }
 
 function handleProcessUpdate(processes: ProcessInfo[]): void {
@@ -139,6 +209,8 @@ function handleProcessUpdate(processes: ProcessInfo[]): void {
       }
     }
 
+    nextSession = applyPreferredContextWindow(nextSession);
+
     if (nextSession.claudeSessionId) {
       sessionIdToPid.set(nextSession.claudeSessionId, proc.pid);
     }
@@ -155,6 +227,7 @@ function handleProcessUpdate(processes: ProcessInfo[]): void {
   // Mark missing as stopped
   for (const [pid, session] of sessions) {
     if (!seenPids.has(pid) && session.status !== 'stopped') {
+      clearPermissionNotification(session);
       sessions.set(pid, updateSessionStatus(session, 'stopped'));
     }
   }
@@ -165,6 +238,7 @@ function handleProcessUpdate(processes: ProcessInfo[]): void {
   for (const [pid, session] of sessions) {
     if (session.status === 'stopped' && now - session.lastActivity.getTime() > 30000) {
       pushSessionHistory(session);
+      clearPermissionNotification(session);
       clearPendingActivitiesForSession(session);
       sessions.delete(pid);
       clearIdentityMappingsForPid(pid);
@@ -212,8 +286,9 @@ function handleFileActivity(activity: ClaudeFileActivity): void {
   transcriptPathToPid.set(activity.filePath, targetPid);
   pendingActivityByFilePath.delete(activity.filePath);
   const nextSession = buildSessionFromActivity(session, activity);
-  sessions.set(targetPid, nextSession);
-  notifySessionTransitions(session, nextSession);
+  const preferredSession = applyPreferredContextWindow(nextSession);
+  sessions.set(targetPid, preferredSession);
+  notifySessionTransitions(session, preferredSession);
 
   broadcastUpdate();
 }
@@ -233,7 +308,8 @@ function buildSessionFromActivity(
     lastActivity: activity.updatedAt,
     claudeSessionId: activity.sessionId ?? session.claudeSessionId,
     transcriptPath: activity.filePath,
-    contextPct: activity.contextPct,
+    contextWindow: activity.contextWindow ?? session.contextWindow,
+    contextPct: activity.contextWindow?.pct ?? activity.contextPct ?? session.contextPct,
   };
 }
 
@@ -302,17 +378,14 @@ function notifySessionTransitions(previous: ClaudeSession, next: ClaudeSession):
   const permissionNotificationsEnabled = config.get<boolean>('notifications.permission', true);
   const contextNotificationsEnabled = config.get<boolean>('notifications.contextWarning', true);
 
-  if (permissionNotificationsEnabled && previous.status !== 'permission' && next.status === 'permission') {
-    void vscode.window.showWarningMessage(`${next.terminalName}: 承認待ちです`, 'パネルを開く')
-      .then(choice => {
-        if (choice === 'パネルを開く') {
-          void vscode.commands.executeCommand('claudeMonitor.focusPanel');
-        }
-      });
+  if (next.status !== 'permission') {
+    clearPermissionNotification(next);
+  } else if (permissionNotificationsEnabled && previous.status !== 'permission') {
+    schedulePermissionNotification(next);
   }
 
   const previousPct = previous.contextPct ?? 0;
-  const nextPct = next.contextPct ?? 0;
+  const nextPct = next.contextWindow?.pct ?? next.contextPct ?? 0;
   if (contextNotificationsEnabled && previousPct < contextWarningThresholdPct && nextPct >= contextWarningThresholdPct) {
     void vscode.window.showWarningMessage(
       `${next.terminalName}: コンテキスト使用率が${contextWarningThresholdPct}%を超えました`
@@ -324,6 +397,7 @@ function applyConfiguration(config = vscode.workspace.getConfiguration('claudeMo
   processMonitor?.setInterval(config.get<number>('pollIntervalMs', 5000));
   fileWatcher?.setContextWindowLimit(config.get<number>('contextWindowTokens', CONTEXT_WINDOW_LIMIT));
   contextWarningThresholdPct = Math.min(100, Math.max(1, config.get<number>('notifications.contextWarningThresholdPct', 90)));
+  permissionNotificationDelayMs = Math.max(0, config.get<number>('notifications.permissionDelayMs', 1500));
 }
 
 function getConfiguredLaunchEnvironment(): Record<string, string> | null | undefined {
@@ -359,6 +433,243 @@ async function editLaunchEnvironmentSetting(): Promise<void> {
   broadcastUpdate();
 }
 
+interface StatuslineBridgeState {
+  installed: boolean;
+  hasCustomStatusLine: boolean;
+  currentCommand?: string;
+}
+
+function getStatuslineBridgeState(): StatuslineBridgeState {
+  try {
+    if (!fs.existsSync(CLAUDE_SETTINGS_PATH)) {
+      return { installed: false, hasCustomStatusLine: false };
+    }
+
+    const raw = fs.readFileSync(CLAUDE_SETTINGS_PATH, 'utf-8').trim();
+    const parsed = raw ? JSON.parse(raw) as Record<string, unknown> : {};
+    const statusLine = parsed['statusLine'];
+    if (!statusLine || typeof statusLine !== 'object' || Array.isArray(statusLine)) {
+      return { installed: false, hasCustomStatusLine: false };
+    }
+
+    const currentCommand = typeof (statusLine as Record<string, unknown>)['command'] === 'string'
+      ? String((statusLine as Record<string, unknown>)['command'])
+      : undefined;
+
+    return {
+      installed: currentCommand === STATUSLINE_BRIDGE_SCRIPT,
+      hasCustomStatusLine: Boolean(currentCommand),
+      currentCommand,
+    };
+  } catch {
+    return { installed: false, hasCustomStatusLine: false };
+  }
+}
+
+function getStatuslineBridgeScript(): string {
+  const snapshotDir = getStatuslineSnapshotDir();
+  const snapshotDirLiteral = JSON.stringify(snapshotDir);
+
+  return `#!/usr/bin/env node
+const fs = require('fs');
+const path = require('path');
+
+let input = '';
+process.stdin.setEncoding('utf8');
+process.stdin.on('data', chunk => { input += chunk; });
+process.stdin.on('end', () => {
+  try {
+    const payload = JSON.parse(input || '{}');
+    const sessionId = typeof payload.session_id === 'string' && payload.session_id ? payload.session_id : 'unknown';
+    const dir = ${snapshotDirLiteral};
+    fs.mkdirSync(dir, { recursive: true });
+    const filePath = path.join(dir, sessionId + '.json');
+    const tempPath = filePath + '.tmp';
+    fs.writeFileSync(tempPath, JSON.stringify(payload), 'utf8');
+    fs.renameSync(tempPath, filePath);
+
+    const model = payload?.model?.display_name || 'Claude';
+    const pct = Math.round(Number(payload?.context_window?.used_percentage || 0));
+    const remainingPct = payload?.context_window?.remaining_percentage;
+    const suffix = Number.isFinite(remainingPct) ? ' · ' + Math.round(Number(remainingPct)) + '% left' : '';
+    process.stdout.write('[' + model + '] ' + pct + '% context' + suffix + '\n');
+  } catch {
+    process.stdout.write('');
+  }
+});
+process.stdin.resume();
+`;
+}
+
+async function installStatuslineBridge(): Promise<void> {
+  let existingSettings: Record<string, unknown> = {};
+  let shouldOverwrite = false;
+
+  try {
+    if (fs.existsSync(CLAUDE_SETTINGS_PATH)) {
+      const raw = fs.readFileSync(CLAUDE_SETTINGS_PATH, 'utf-8').trim();
+      existingSettings = raw ? JSON.parse(raw) as Record<string, unknown> : {};
+      const existingStatusLine = existingSettings['statusLine'];
+      if (
+        existingStatusLine &&
+        typeof existingStatusLine === 'object' &&
+        !Array.isArray(existingStatusLine)
+      ) {
+        const currentCommand = typeof (existingStatusLine as Record<string, unknown>)['command'] === 'string'
+          ? String((existingStatusLine as Record<string, unknown>)['command'])
+          : '';
+        if (currentCommand && currentCommand !== STATUSLINE_BRIDGE_SCRIPT) {
+          const answer = await vscode.window.showWarningMessage(
+            'Claude Code の既存 statusLine 設定を claude-monitor 用ブリッジに置き換えますか？',
+            { modal: true },
+            '置き換える'
+          );
+          if (answer !== '置き換える') {
+            return;
+          }
+          shouldOverwrite = true;
+        }
+      }
+    }
+  } catch (error) {
+    void vscode.window.showErrorMessage(`~/.claude/settings.json を読み込めませんでした: ${(error as Error).message}`);
+    return;
+  }
+
+  try {
+    fs.mkdirSync(STATUSLINE_BRIDGE_DIR, { recursive: true });
+    fs.mkdirSync(path.dirname(CLAUDE_SETTINGS_PATH), { recursive: true });
+    fs.writeFileSync(STATUSLINE_BRIDGE_SCRIPT, getStatuslineBridgeScript(), 'utf-8');
+    fs.chmodSync(STATUSLINE_BRIDGE_SCRIPT, 0o755);
+
+    const nextSettings = {
+      ...existingSettings,
+      statusLine: {
+        type: 'command',
+        command: STATUSLINE_BRIDGE_SCRIPT,
+        padding: 1,
+        refreshInterval: 1,
+      },
+    };
+
+    fs.writeFileSync(CLAUDE_SETTINGS_PATH, `${JSON.stringify(nextSettings, null, 2)}\n`, 'utf-8');
+
+    const message = shouldOverwrite
+      ? 'claude-monitor 用 statusline ブリッジをインストールし、既存設定を更新しました。'
+      : 'claude-monitor 用 statusline ブリッジをインストールしました。';
+    void vscode.window.showInformationMessage(message);
+  } catch (error) {
+    void vscode.window.showErrorMessage(`statusline ブリッジのインストールに失敗しました: ${(error as Error).message}`);
+  }
+}
+
+async function uninstallStatuslineBridge(): Promise<void> {
+  let existingSettings: Record<string, unknown> = {};
+
+  try {
+    if (fs.existsSync(CLAUDE_SETTINGS_PATH)) {
+      const raw = fs.readFileSync(CLAUDE_SETTINGS_PATH, 'utf-8').trim();
+      existingSettings = raw ? JSON.parse(raw) as Record<string, unknown> : {};
+    }
+  } catch (error) {
+    void vscode.window.showErrorMessage(`~/.claude/settings.json を読み込めませんでした: ${(error as Error).message}`);
+    return;
+  }
+
+  const statusLine = existingSettings['statusLine'];
+  const currentCommand = statusLine && typeof statusLine === 'object' && !Array.isArray(statusLine)
+    ? (statusLine as Record<string, unknown>)['command']
+    : undefined;
+
+  if (currentCommand !== STATUSLINE_BRIDGE_SCRIPT) {
+    void vscode.window.showInformationMessage('claude-monitor 用 statusline ブリッジは現在インストールされていません。');
+    return;
+  }
+
+  const answer = await vscode.window.showWarningMessage(
+    'claude-monitor 用 statusline ブリッジを解除しますか？',
+    { modal: true },
+    '解除する'
+  );
+  if (answer !== '解除する') {
+    return;
+  }
+
+  try {
+    const nextSettings = { ...existingSettings };
+    delete nextSettings['statusLine'];
+    fs.writeFileSync(CLAUDE_SETTINGS_PATH, `${JSON.stringify(nextSettings, null, 2)}\n`, 'utf-8');
+
+    if (fs.existsSync(STATUSLINE_BRIDGE_SCRIPT)) {
+      fs.unlinkSync(STATUSLINE_BRIDGE_SCRIPT);
+    }
+
+    void vscode.window.showInformationMessage('claude-monitor 用 statusline ブリッジを解除しました。');
+  } catch (error) {
+    void vscode.window.showErrorMessage(`statusline ブリッジの解除に失敗しました: ${(error as Error).message}`);
+  }
+}
+
+async function openSettingsMenu(): Promise<void> {
+  const config = vscode.workspace.getConfiguration('claudeMonitor');
+  const launchEnvironment = config.get<string>('launchEnvironment', '').trim();
+  const bridgeState = getStatuslineBridgeState();
+  const showUsageDashboard = config.get<boolean>('showUsageDashboard', true);
+
+  const picked = await vscode.window.showQuickPick(
+    [
+      {
+        label: showUsageDashboard ? '$(eye) Dashboard を隠す' : '$(eye) Dashboard を表示する',
+        description: showUsageDashboard ? '上部アコーディオンを非表示にします' : '上部アコーディオンを表示します',
+        action: 'toggleUsageDashboard' as const,
+      },
+      {
+        label: '$(gear) 起動時の環境変数',
+        description: launchEnvironment || '未設定',
+        action: 'launchEnvironment' as const,
+      },
+      {
+        label: bridgeState.installed ? '$(pass) Statusline Bridge を再インストール' : '$(plug) Statusline Bridge をインストール',
+        description: bridgeState.installed
+          ? 'claude-monitor の statusline bridge は有効です'
+          : bridgeState.hasCustomStatusLine
+            ? `現在の statusLine: ${bridgeState.currentCommand}`
+            : 'Claude Code の context_window を claude-monitor に連携します',
+        action: 'installBridge' as const,
+      },
+      {
+        label: '$(debug-disconnect) Statusline Bridge を解除',
+        description: bridgeState.installed ? 'claude-monitor の statusline bridge を外します' : '現在は未インストールです',
+        action: 'uninstallBridge' as const,
+      },
+    ],
+    {
+      title: 'Claude Monitor Settings',
+      placeHolder: '変更したい設定項目を選択してください',
+    }
+  );
+
+  if (!picked) {
+    return;
+  }
+
+  switch (picked.action) {
+    case 'toggleUsageDashboard':
+      await config.update('showUsageDashboard', !showUsageDashboard, vscode.ConfigurationTarget.Workspace);
+      broadcastUpdate();
+      break;
+    case 'launchEnvironment':
+      await editLaunchEnvironmentSetting();
+      break;
+    case 'installBridge':
+      await installStatuslineBridge();
+      break;
+    case 'uninstallBridge':
+      await uninstallStatuslineBridge();
+      break;
+  }
+}
+
 function prunePendingActivities(now: number): void {
   for (const [sessionId, activity] of pendingActivityBySessionId) {
     if (now - activity.updatedAt.getTime() > PENDING_ACTIVITY_TTL_MS) {
@@ -379,6 +690,7 @@ function cleanupResources(): void {
   }
 
   hasCleanedUp = true;
+  clearAllPermissionNotifications();
   processMonitor?.stop();
   fileWatcher?.stop();
   terminalManager?.stop();
@@ -479,7 +791,11 @@ export function activate(context: vscode.ExtensionContext): void {
     }),
 
     vscode.commands.registerCommand('claudeMonitor.editLaunchEnvironment', async () => {
-      await editLaunchEnvironmentSetting();
+      await openSettingsMenu();
+    }),
+
+    vscode.commands.registerCommand('claudeMonitor.installStatuslineBridge', async () => {
+      await installStatuslineBridge();
     }),
 
     vscode.commands.registerCommand('claudeMonitor.newSession', async () => {
@@ -538,6 +854,7 @@ export function activate(context: vscode.ExtensionContext): void {
       if (
         event.affectsConfiguration('claudeMonitor.pollIntervalMs') ||
         event.affectsConfiguration('claudeMonitor.contextWindowTokens') ||
+        event.affectsConfiguration('claudeMonitor.notifications.permissionDelayMs') ||
         event.affectsConfiguration('claudeMonitor.notifications.contextWarningThresholdPct')
       ) {
         applyConfiguration();
@@ -639,6 +956,7 @@ function registerPanelMessages(): void {
         if (!session) break;
 
         const sequence = getPermissionReplySequence(msg.choice);
+        clearPermissionNotification(session);
         if (session.terminal) {
           await terminalManager.sendSequence(session.terminal, sequence);
         } else {
