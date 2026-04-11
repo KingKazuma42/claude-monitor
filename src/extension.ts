@@ -43,6 +43,7 @@ let ipcManager: IpcManager;
 let messageDisposable: vscode.Disposable | undefined;
 let hasCleanedUp = false;
 let contextWarningThresholdPct = 90;
+let contextWindowLimitTokens = CONTEXT_WINDOW_LIMIT;
 let permissionNotificationDelayMs = 1500;
 
 const pendingPermissionNotifications = new Map<string, NodeJS.Timeout>();
@@ -115,7 +116,7 @@ function applyPreferredContextWindow(session: ClaudeSession): ClaudeSession {
     return session;
   }
 
-  const contextWindow = readStatuslineContextUsage(session.claudeSessionId);
+  const contextWindow = readStatuslineContextUsage(session.claudeSessionId, undefined, contextWindowLimitTokens);
   if (!contextWindow) {
     return session;
   }
@@ -395,7 +396,8 @@ function notifySessionTransitions(previous: ClaudeSession, next: ClaudeSession):
 
 function applyConfiguration(config = vscode.workspace.getConfiguration('claudeMonitor')): void {
   processMonitor?.setInterval(config.get<number>('pollIntervalMs', 5000));
-  fileWatcher?.setContextWindowLimit(config.get<number>('contextWindowTokens', CONTEXT_WINDOW_LIMIT));
+  contextWindowLimitTokens = Math.max(1, config.get<number>('contextWindowTokens', CONTEXT_WINDOW_LIMIT));
+  fileWatcher?.setContextWindowLimit(contextWindowLimitTokens);
   contextWarningThresholdPct = Math.min(100, Math.max(1, config.get<number>('notifications.contextWarningThresholdPct', 90)));
   permissionNotificationDelayMs = Math.max(0, config.get<number>('notifications.permissionDelayMs', 1500));
 }

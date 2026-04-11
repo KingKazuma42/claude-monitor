@@ -8,6 +8,7 @@
 
 import * as assert from 'assert';
 import {
+  AUTO_COMPACT_WARNING_LIMIT,
   extractContextPct,
   extractTranscriptContextUsage,
   CONTEXT_WINDOW_LIMIT,
@@ -74,14 +75,14 @@ test('assistant entry with null usage returns undefined', () => {
 });
 
 test('output_tokens are excluded from context usage', () => {
-  // input=100_000, cache_create=40_000, cache_read=20_000, output=20_000 → 160_000/200_000 = 80%
+  // input=100_000, cache_create=40_000, cache_read=20_000, output=20_000 → 160_000/160_000 = 100%
   const line = assistantLine({
     input_tokens: 100_000,
     cache_creation_input_tokens: 40_000,
     cache_read_input_tokens: 20_000,
     output_tokens: 20_000,
   });
-  assert.strictEqual(extractContextPct([line]), 80);
+  assert.strictEqual(extractContextPct([line]), 100);
 });
 
 test('transcript context usage exposes used, limit, and remaining tokens', () => {
@@ -95,18 +96,20 @@ test('transcript context usage exposes used, limit, and remaining tokens', () =>
   assert.ok(usage);
   assert.deepStrictEqual(usage, {
     usedTokens: 135_000,
-    limitTokens: CONTEXT_WINDOW_LIMIT,
-    remainingTokens: 65_000,
-    pct: 68,
+    limitTokens: AUTO_COMPACT_WARNING_LIMIT,
+    remainingTokens: 25_000,
+    actualLimitTokens: CONTEXT_WINDOW_LIMIT,
+    actualRemainingTokens: 65_000,
+    pct: 84,
     source: 'transcript',
     modelId: undefined,
   });
 });
 
 test('only input_tokens set — other fields treated as 0', () => {
-  // 100_000/200_000 = 50%
+  // 100_000/160_000 = 62.5% → 63%
   const line = assistantLine({ input_tokens: 100_000 });
-  assert.strictEqual(extractContextPct([line]), 50);
+  assert.strictEqual(extractContextPct([line]), 63);
 });
 
 test('all tokens zero returns 0', () => {
@@ -115,24 +118,24 @@ test('all tokens zero returns 0', () => {
 });
 
 test('total exactly equal to limit returns 100', () => {
-  const line = assistantLine({ input_tokens: CONTEXT_WINDOW_LIMIT });
+  const line = assistantLine({ input_tokens: AUTO_COMPACT_WARNING_LIMIT });
   assert.strictEqual(extractContextPct([line]), 100);
 });
 
 test('total exceeding limit is capped at 100', () => {
-  const line = assistantLine({ input_tokens: CONTEXT_WINDOW_LIMIT + 50_000 });
+  const line = assistantLine({ input_tokens: AUTO_COMPACT_WARNING_LIMIT + 50_000 });
   assert.strictEqual(extractContextPct([line]), 100);
 });
 
-test('fractional percentage is rounded (79.9995 → 80)', () => {
-  // 159_999 / 200_000 * 100 = 79.9995 → rounds to 80
-  const line = assistantLine({ input_tokens: 159_999 });
+test('fractional percentage is rounded (79.999375 → 80)', () => {
+  // 127_999 / 160_000 * 100 = 79.999375 → rounds to 80
+  const line = assistantLine({ input_tokens: 127_999 });
   assert.strictEqual(extractContextPct([line]), 80);
 });
 
-test('fractional percentage is rounded (79.4999 → 79)', () => {
-  // 158_999 / 200_000 * 100 = 79.4995 → rounds to 79
-  const line = assistantLine({ input_tokens: 158_999 });
+test('fractional percentage is rounded (79.499375 → 79)', () => {
+  // 127_199 / 160_000 * 100 = 79.499375 → rounds to 79
+  const line = assistantLine({ input_tokens: 127_199 });
   assert.strictEqual(extractContextPct([line]), 79);
 });
 
@@ -145,31 +148,31 @@ test('sidechain-only assistant entries return undefined', () => {
 });
 
 test('sidechain entry is skipped; preceding main-session entry is used', () => {
-  // main entry: 100_000 → 50%. sidechain entry: 180_000 → 90%.
+  // main entry: 100_000 → 63%. sidechain entry: 180_000 → 100%.
   // The sidechain line comes LAST — must be ignored.
   const lines = [
     assistantLine({ input_tokens: 100_000 }),   // main (older)
     sidechainLine({ input_tokens: 180_000 }),   // sidechain (newer, must be skipped)
   ];
-  assert.strictEqual(extractContextPct(lines), 50);
+  assert.strictEqual(extractContextPct(lines), 63);
 });
 
 test('last (most recent) main-session entry wins over older ones', () => {
-  // older: 50%, newer: 80% — newer is at the end of the file
+  // older: 63%, newer: 100% — newer is at the end of the file
   const lines = [
-    assistantLine({ input_tokens: 100_000 }),  // 50%
-    assistantLine({ input_tokens: 160_000 }),  // 80%
+    assistantLine({ input_tokens: 100_000 }),  // 63%
+    assistantLine({ input_tokens: 160_000 }),  // 100%
   ];
-  assert.strictEqual(extractContextPct(lines), 80);
+  assert.strictEqual(extractContextPct(lines), 100);
 });
 
 test('malformed JSON lines are skipped gracefully', () => {
   const lines = [
     'not json at all',
     '{broken:',
-    assistantLine({ input_tokens: 50_000 }),  // 25%
+    assistantLine({ input_tokens: 50_000 }),  // 31%
   ];
-  assert.strictEqual(extractContextPct(lines), 25);
+  assert.strictEqual(extractContextPct(lines), 31);
 });
 
 test('blank lines interspersed do not cause errors', () => {
@@ -179,7 +182,7 @@ test('blank lines interspersed do not cause errors', () => {
     '',
     '',
   ];
-  assert.strictEqual(extractContextPct(lines), 25);
+  assert.strictEqual(extractContextPct(lines), 31);
 });
 
 test('non-assistant types (user, system, progress) are skipped', () => {
@@ -187,22 +190,22 @@ test('non-assistant types (user, system, progress) are skipped', () => {
     userLine('question'),
     JSON.stringify({ type: 'system', message: { content: 'compact done' } }),
     JSON.stringify({ type: 'progress', message: {} }),
-    assistantLine({ input_tokens: 40_000 }),  // 20%
+    assistantLine({ input_tokens: 40_000 }),  // 25%
   ];
-  assert.strictEqual(extractContextPct(lines), 20);
+  assert.strictEqual(extractContextPct(lines), 25);
 });
 
 test('assistant entry without message field is skipped; falls back to earlier entry', () => {
   // withoutMessage has no `message` field → no usage → skipped.
   // extractContextPct scans backwards for the last entry WITH usage data.
   const withoutMessage = JSON.stringify({ type: 'assistant', something: 'else' });
-  const withMessage = assistantLine({ input_tokens: 60_000 });  // 30%
+  const withMessage = assistantLine({ input_tokens: 60_000 });  // 38%
 
   // withMessage is the last entry → found immediately
-  assert.strictEqual(extractContextPct([withoutMessage, withMessage]), 30);
+  assert.strictEqual(extractContextPct([withoutMessage, withMessage]), 38);
 
   // withoutMessage is the last entry → skipped; falls back to withMessage (older)
-  assert.strictEqual(extractContextPct([withMessage, withoutMessage]), 30);
+  assert.strictEqual(extractContextPct([withMessage, withoutMessage]), 38);
 });
 
 // ─── color-threshold boundary values ────────────────────────────────────────
@@ -215,32 +218,32 @@ test('assistant entry without message field is skipped; falls back to earlier en
 console.log('\nColor threshold boundary values (pct that extractContextPct produces)');
 
 test('79% → below warning threshold', () => {
-  // 158_000 / 200_000 * 100 = 79 → ctx-normal
-  const line = assistantLine({ input_tokens: 158_000 });
+  // 126_400 / 160_000 * 100 = 79 → ctx-normal
+  const line = assistantLine({ input_tokens: 126_400 });
   const pct = extractContextPct([line]);
   assert.strictEqual(pct, 79);
   assert.ok(pct! < 80, `Expected pct < 80, got ${pct}`);
 });
 
 test('80% → warning threshold', () => {
-  // 160_000 / 200_000 * 100 = 80 → ctx-warning
-  const line = assistantLine({ input_tokens: 160_000 });
+  // 128_000 / 160_000 * 100 = 80 → ctx-warning
+  const line = assistantLine({ input_tokens: 128_000 });
   const pct = extractContextPct([line]);
   assert.strictEqual(pct, 80);
   assert.ok(pct! >= 80 && pct! < 90, `Expected 80 <= pct < 90, got ${pct}`);
 });
 
 test('89% → still warning (not danger)', () => {
-  // 178_000 / 200_000 * 100 = 89 → ctx-warning
-  const line = assistantLine({ input_tokens: 178_000 });
+  // 142_400 / 160_000 * 100 = 89 → ctx-warning
+  const line = assistantLine({ input_tokens: 142_400 });
   const pct = extractContextPct([line]);
   assert.strictEqual(pct, 89);
   assert.ok(pct! >= 80 && pct! < 90, `Expected 80 <= pct < 90, got ${pct}`);
 });
 
 test('90% → danger threshold', () => {
-  // 180_000 / 200_000 * 100 = 90 → ctx-danger
-  const line = assistantLine({ input_tokens: 180_000 });
+  // 144_000 / 160_000 * 100 = 90 → ctx-danger
+  const line = assistantLine({ input_tokens: 144_000 });
   const pct = extractContextPct([line]);
   assert.strictEqual(pct, 90);
   assert.ok(pct! >= 90, `Expected pct >= 90, got ${pct}`);
