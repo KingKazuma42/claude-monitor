@@ -98,9 +98,9 @@
         },
         "claudeMonitor.contextWindowTokens": {
           "type": "number",
-          "default": 200000,
+          "default": 160000,
           "minimum": 1,
-          "description": "Fallback token limit used when neither statusline hook data nor a model-specific context limit is available"
+          "description": "Token threshold treated as 100% for compact warnings and context usage display. Claude Monitor warns against this value even when the underlying model window is larger."
         },
         "claudeMonitor.launchEnvironment": {
           "type": "string",

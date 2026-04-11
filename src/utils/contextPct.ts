@@ -5,12 +5,16 @@
 
 /** Token limit for current Claude models (Sonnet / Opus / Haiku). */
 export const CONTEXT_WINDOW_LIMIT = 200_000;
+/** Treat this threshold as 100% so compact warnings trigger before Claude auto-compacts. */
+export const AUTO_COMPACT_WARNING_LIMIT = 160_000;
 export const EXTENDED_CONTEXT_WINDOW_LIMIT = 1_000_000;
 
 export interface ContextWindowUsage {
   usedTokens: number;
   limitTokens: number;
   remainingTokens: number;
+  actualLimitTokens: number;
+  actualRemainingTokens: number;
   pct: number;
   source: 'statusline-hook' | 'transcript';
   modelId?: string;
@@ -52,8 +56,12 @@ export function createContextWindowUsage(
   limitTokens: number,
   source: ContextWindowUsage['source'],
   modelId?: string,
+  warningLimitTokens = AUTO_COMPACT_WARNING_LIMIT,
 ): ContextWindowUsage {
-  const normalizedLimit = limitTokens > 0 ? Math.round(limitTokens) : CONTEXT_WINDOW_LIMIT;
+  const normalizedActualLimit = limitTokens > 0 ? Math.round(limitTokens) : CONTEXT_WINDOW_LIMIT;
+  const normalizedLimit = warningLimitTokens > 0
+    ? Math.min(normalizedActualLimit, Math.round(warningLimitTokens))
+    : normalizedActualLimit;
   const normalizedUsed = Math.max(0, Math.round(usedTokens));
   const pct = Math.min(100, Math.max(0, Math.round((normalizedUsed / normalizedLimit) * 100)));
 
@@ -61,6 +69,8 @@ export function createContextWindowUsage(
     usedTokens: normalizedUsed,
     limitTokens: normalizedLimit,
     remainingTokens: Math.max(0, normalizedLimit - normalizedUsed),
+    actualLimitTokens: normalizedActualLimit,
+    actualRemainingTokens: Math.max(0, normalizedActualLimit - normalizedUsed),
     pct,
     source,
     modelId,
@@ -81,7 +91,7 @@ export function createContextWindowUsage(
 export function extractTranscriptContextUsage(
   lines: string[],
   modelId?: string,
-  contextWindowLimit = CONTEXT_WINDOW_LIMIT,
+  warningLimitTokens = AUTO_COMPACT_WARNING_LIMIT,
 ): ContextWindowUsage | undefined {
   for (let i = lines.length - 1; i >= 0; i--) {
     const line = lines[i].trim();
@@ -101,20 +111,20 @@ export function extractTranscriptContextUsage(
     if (!isRecord(usage)) { continue; }
 
     const effectiveModelId = typeof message['model'] === 'string' ? message['model'] : modelId;
-    const limitTokens = resolveContextWindowLimit(effectiveModelId, contextWindowLimit);
+    const actualLimitTokens = resolveContextWindowLimit(effectiveModelId, CONTEXT_WINDOW_LIMIT);
     const usedTokens =
       numOrZero(usage['input_tokens']) +
       numOrZero(usage['cache_creation_input_tokens']) +
       numOrZero(usage['cache_read_input_tokens']);
 
-    return createContextWindowUsage(usedTokens, limitTokens, 'transcript', effectiveModelId);
+    return createContextWindowUsage(usedTokens, actualLimitTokens, 'transcript', effectiveModelId, warningLimitTokens);
   }
 
   return undefined;
 }
 
-export function extractContextPct(lines: string[], contextWindowLimit = CONTEXT_WINDOW_LIMIT): number | undefined {
-  return extractTranscriptContextUsage(lines, undefined, contextWindowLimit)?.pct;
+export function extractContextPct(lines: string[], warningLimitTokens = AUTO_COMPACT_WARNING_LIMIT): number | undefined {
+  return extractTranscriptContextUsage(lines, undefined, warningLimitTokens)?.pct;
 }
 
 function isRecord(v: unknown): v is Record<string, unknown> {

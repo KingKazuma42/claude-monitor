@@ -2,6 +2,7 @@ import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
 import {
+  AUTO_COMPACT_WARNING_LIMIT,
   CONTEXT_WINDOW_LIMIT,
   ContextWindowUsage,
   createContextWindowUsage,
@@ -43,6 +44,7 @@ export function getStatuslineSnapshotPath(sessionId: string, homeDir = os.homedi
 export function readStatuslineContextUsage(
   sessionId: string,
   fallbackModelId?: string,
+  warningLimitTokens = AUTO_COMPACT_WARNING_LIMIT,
   homeDir = os.homedir(),
 ): ContextWindowUsage | undefined {
   const snapshotPath = getStatuslineSnapshotPath(sessionId, homeDir);
@@ -55,7 +57,7 @@ export function readStatuslineContextUsage(
 
     const raw = fs.readFileSync(snapshotPath, 'utf-8');
     const parsed = JSON.parse(raw) as StatuslineSnapshot;
-    return extractStatuslineContextUsage(parsed, fallbackModelId);
+    return extractStatuslineContextUsage(parsed, fallbackModelId, warningLimitTokens);
   } catch {
     return undefined;
   }
@@ -64,6 +66,7 @@ export function readStatuslineContextUsage(
 export function extractStatuslineContextUsage(
   snapshot: StatuslineSnapshot,
   fallbackModelId?: string,
+  warningLimitTokens = AUTO_COMPACT_WARNING_LIMIT,
 ): ContextWindowUsage | undefined {
   const contextWindow = snapshot.context_window;
   if (!isRecord(contextWindow)) {
@@ -85,18 +88,18 @@ export function extractStatuslineContextUsage(
       (positiveNumber(currentUsage.input_tokens) ?? 0) +
       (positiveNumber(currentUsage.cache_creation_input_tokens) ?? 0) +
       (positiveNumber(currentUsage.cache_read_input_tokens) ?? 0);
-    return createContextWindowUsage(usedTokens, limitTokens, 'statusline-hook', modelId);
+    return createContextWindowUsage(usedTokens, limitTokens, 'statusline-hook', modelId, warningLimitTokens);
   }
 
   const totalInputTokens = positiveNumber(contextWindow.total_input_tokens);
   if (totalInputTokens !== undefined) {
-    return createContextWindowUsage(totalInputTokens, limitTokens, 'statusline-hook', modelId);
+    return createContextWindowUsage(totalInputTokens, limitTokens, 'statusline-hook', modelId, warningLimitTokens);
   }
 
   const usedPercentage = positiveNumber(contextWindow.used_percentage);
   if (usedPercentage !== undefined) {
     const usedTokens = Math.round((usedPercentage / 100) * limitTokens);
-    return createContextWindowUsage(usedTokens, limitTokens, 'statusline-hook', modelId);
+    return createContextWindowUsage(usedTokens, limitTokens, 'statusline-hook', modelId, warningLimitTokens);
   }
 
   return undefined;

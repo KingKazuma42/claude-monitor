@@ -22,7 +22,7 @@
  */
 
 import * as assert from 'assert';
-import { extractContextPct, CONTEXT_WINDOW_LIMIT } from '../utils/contextPct';
+import { extractContextPct, AUTO_COMPACT_WARNING_LIMIT } from '../utils/contextPct';
 
 // ─── inline copy of deriveStatus ────────────────────────────────────────────
 // Keep in sync with FileWatcher.deriveStatus() in src/monitors/fileWatcher.ts.
@@ -134,47 +134,47 @@ test('before any message: undefined', () => {
   assert.strictEqual(extractContextPct([]), undefined);
 });
 
-test('turn 1: 10% (20 000 tokens)', () => {
+test('turn 1: 13% (20 000 tokens)', () => {
   const lines = [
     userLine('first question'),
     assistantLine(20_000),
   ];
-  assert.strictEqual(extractContextPct(lines), 10);
+  assert.strictEqual(extractContextPct(lines), 13);
 });
 
-test('turn 2: 30% (newer entry replaces older)', () => {
+test('turn 2: 38% (newer entry replaces older)', () => {
   const lines = [
     userLine('first question'),
-    assistantLine(20_000),  // turn 1 — 10 %
+    assistantLine(20_000),  // turn 1 — 13 %
     userLine('follow-up'),
-    assistantLine(60_000),  // turn 2 — 30 %
+    assistantLine(60_000),  // turn 2 — 38 %
   ];
-  assert.strictEqual(extractContextPct(lines), 30);
+  assert.strictEqual(extractContextPct(lines), 38);
 });
 
-test('turn 3: 60%', () => {
+test('turn 3: 75%', () => {
   const lines = [
-    assistantLine(20_000),   // 10 %
-    assistantLine(60_000),   // 30 %
-    assistantLine(120_000),  // 60 %
+    assistantLine(20_000),   // 13 %
+    assistantLine(60_000),   // 38 %
+    assistantLine(120_000),  // 75 %
   ];
-  assert.strictEqual(extractContextPct(lines), 60);
+  assert.strictEqual(extractContextPct(lines), 75);
 });
 
-test('turn 4: 85% — approaching compact threshold', () => {
+test('turn 4: 100% — compact warning threshold reached', () => {
   const lines = [
     assistantLine(20_000),
     assistantLine(60_000),
     assistantLine(120_000),
-    assistantLine(170_000),  // 85 %
+    assistantLine(170_000),  // capped at 100 %
   ];
-  assert.strictEqual(extractContextPct(lines), 85);
+  assert.strictEqual(extractContextPct(lines), 100);
 });
 
 test('% never exceeds 100 even if tokens overshoot limit', () => {
   const lines = [
-    assistantLine(170_000),               // 85 %
-    assistantLine(CONTEXT_WINDOW_LIMIT + 10_000),  // would be 105 % → capped at 100
+    assistantLine(170_000),                           // already capped at 100 %
+    assistantLine(AUTO_COMPACT_WARNING_LIMIT + 10_000),  // would exceed 100 % → capped at 100
   ];
   assert.strictEqual(extractContextPct(lines), 100);
 });
@@ -192,22 +192,22 @@ test('% never exceeds 100 even if tokens overshoot limit', () => {
 console.log('\nextractContextPct – post-compact behaviour');
 
 test('old JSONL: system entry at end is ignored; last assistant % is preserved', () => {
-  // Old file just before compact was at 85 %.
+  // Old file just before compact was already at the warning ceiling.
   // The system "compact complete" line is appended but must NOT change the reported %.
   const oldJSONLLines = [
-    assistantLine(170_000),  // 85 % — last assistant entry
+    assistantLine(170_000),  // 100 % — last assistant entry
     systemLine('compact complete'),
   ];
-  assert.strictEqual(extractContextPct(oldJSONLLines), 85);
+  assert.strictEqual(extractContextPct(oldJSONLLines), 100);
 });
 
 test('new JSONL: starts at a low % after compact', () => {
   // The new file begins with the compacted summary; token count is much lower.
   const newJSONLLines = [
     userLine('compact summary injected by Claude Code'),
-    assistantLine(24_000),  // ~12 % — compacted context
+    assistantLine(24_000),  // 15 % — compacted context
   ];
-  assert.strictEqual(extractContextPct(newJSONLLines), 12);
+  assert.strictEqual(extractContextPct(newJSONLLines), 15);
 });
 
 test('new JSONL with system-only entries (no assistant yet): returns undefined', () => {
@@ -218,14 +218,14 @@ test('new JSONL with system-only entries (no assistant yet): returns undefined',
 });
 
 test('% drop is visible when comparing old vs new file', () => {
-  const oldLines = [assistantLine(170_000), systemLine()];  // 85 %
-  const newLines = [assistantLine(24_000)];                 // 12 %
+  const oldLines = [assistantLine(170_000), systemLine()];  // 100 %
+  const newLines = [assistantLine(24_000)];                 // 15 %
 
   const pctBefore = extractContextPct(oldLines);
   const pctAfter  = extractContextPct(newLines);
 
-  assert.strictEqual(pctBefore, 85);
-  assert.strictEqual(pctAfter,  12);
+  assert.strictEqual(pctBefore, 100);
+  assert.strictEqual(pctAfter,  15);
   assert.ok(pctAfter! < pctBefore!, `Expected pctAfter (${pctAfter}) < pctBefore (${pctBefore})`);
 });
 
@@ -316,7 +316,7 @@ test('OLD file during compact: high % + waiting status', () => {
     assistantLine(170_000, 'end_turn'),
     systemLine('compact complete'),
   ];
-  assert.strictEqual(extractContextPct(oldLines), 85,        'old file: % unchanged');
+  assert.strictEqual(extractContextPct(oldLines), 100,       'old file: % unchanged');
   assert.strictEqual(deriveStatus(oldLines),      'waiting', 'old file: status = waiting');
 });
 
@@ -325,24 +325,24 @@ test('NEW file after compact: low % + waiting status', () => {
     userLine('compacted context summary'),
     assistantLine(24_000, 'end_turn'),
   ];
-  assert.strictEqual(extractContextPct(newLines), 12,        'new file: low %');
+  assert.strictEqual(extractContextPct(newLines), 15,        'new file: low %');
   assert.strictEqual(deriveStatus(newLines),      'waiting', 'new file: status = waiting');
 });
 
 test('NEW file: % continues to rise again in subsequent turns', () => {
   const newLines = [
-    assistantLine(24_000),   // 12 % immediately post-compact
-    assistantLine(50_000),   // 25 % after first new turn
-    assistantLine(80_000),   // 40 % — rising again
+    assistantLine(24_000),   // 15 % immediately post-compact
+    assistantLine(50_000),   // 31 % after first new turn
+    assistantLine(80_000),   // 50 % — rising again
   ];
   const pcts = [
     extractContextPct([newLines[0]]),
     extractContextPct([newLines[0], newLines[1]]),
     extractContextPct(newLines),
   ];
-  assert.strictEqual(pcts[0], 12);
-  assert.strictEqual(pcts[1], 25);
-  assert.strictEqual(pcts[2], 40);
+  assert.strictEqual(pcts[0], 15);
+  assert.strictEqual(pcts[1], 31);
+  assert.strictEqual(pcts[2], 50);
   assert.ok(pcts[0]! < pcts[1]! && pcts[1]! < pcts[2]!, '% rises monotonically after compact');
 });
 
