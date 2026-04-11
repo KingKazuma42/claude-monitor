@@ -36,9 +36,11 @@ test('prefers current_usage and excludes output tokens', () => {
 
   assert.deepStrictEqual(usage, {
     usedTokens: 95_000,
-    limitTokens: 200_000,
-    remainingTokens: 105_000,
-    pct: 48,
+    limitTokens: 160_000,
+    remainingTokens: 65_000,
+    actualLimitTokens: 200_000,
+    actualRemainingTokens: 105_000,
+    pct: 59,
     source: 'statusline-hook',
     modelId: 'claude-sonnet-4-5-20251001',
   });
@@ -56,9 +58,11 @@ test('falls back to total_input_tokens when current_usage is absent', () => {
 
   assert.deepStrictEqual(usage, {
     usedTokens: 150_000,
-    limitTokens: 200_000,
-    remainingTokens: 50_000,
-    pct: 75,
+    limitTokens: 160_000,
+    remainingTokens: 10_000,
+    actualLimitTokens: 200_000,
+    actualRemainingTokens: 50_000,
+    pct: 94,
     source: 'statusline-hook',
     modelId: undefined,
   });
@@ -74,9 +78,11 @@ test('falls back to model-based context limit when size is absent', () => {
   });
 
   assert.ok(usage);
-  assert.strictEqual(usage?.limitTokens, 200_000);
-  assert.strictEqual(usage?.remainingTokens, 100_000);
-  assert.strictEqual(usage?.pct, 50);
+  assert.strictEqual(usage?.limitTokens, 160_000);
+  assert.strictEqual(usage?.remainingTokens, 60_000);
+  assert.strictEqual(usage?.actualLimitTokens, 200_000);
+  assert.strictEqual(usage?.actualRemainingTokens, 100_000);
+  assert.strictEqual(usage?.pct, 63);
 });
 
 console.log(`\n${passed + failed} tests: ${passed} passed, ${failed} failed\n`);
