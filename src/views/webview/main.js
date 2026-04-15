@@ -149,6 +149,14 @@ function renderSessions(sessions, history = []) {
     });
   });
 
+  list.querySelectorAll('.btn-reattach').forEach(btn => {
+    btn.addEventListener('click', e => {
+      e.stopPropagation();
+      const id = /** @type {HTMLElement} */ (btn).dataset.id;
+      vscode.postMessage({ type: 'reattachTmux', sessionId: id });
+    });
+  });
+
   list.querySelectorAll('.btn-approve, .btn-reject').forEach(btn => {
     btn.addEventListener('click', e => {
       e.stopPropagation();
@@ -520,13 +528,22 @@ function renderSessionCard(session) {
   const memMB = session.memoryMB ?? 0;
   const isExternal = session.isExternal === true;
   const isHistorical = session.isHistorical === true;
+  const isTmux = !!session.tmuxSessionName;
+  const isDetachedTmux = isExternal && isTmux;
+  const isOtherWindow = isExternal && !isTmux;
   const stoppedAtStr = session.stoppedAt ? formatRelative(new Date(session.stoppedAt)) : '';
 
   const conversationHtml = buildConversationHtml(session.conversation ?? []);
 
-  const focusBtn = isExternal || isHistorical
-    ? '' // 別ウィンドウはターミナルを直接開けないので非表示
-    : `<button class="btn btn-focus" data-id="${session.id}">ターミナルを開く</button>`;
+  // Reattach button for detached tmux sessions; normal focus button for local sessions.
+  // Sessions in other windows have no direct terminal access button.
+  const focusBtn = isHistorical
+    ? ''
+    : isDetachedTmux
+      ? `<button class="btn btn-reattach" data-id="${session.id}">Reattach</button>`
+      : isOtherWindow
+        ? ''
+        : `<button class="btn btn-focus" data-id="${session.id}">ターミナルを開く</button>`;
   const approvalActions = '';
 
   return `
@@ -534,7 +551,8 @@ function renderSessionCard(session) {
       <div class="session-header" data-id="${session.id}">
         <span class="status-dot ${statusClass}"></span>
         <span class="session-title">${escapeHtml(session.terminalName)}</span>
-        ${isExternal ? '<span class="badge-external">別ウィンドウ</span>' : ''}
+        ${isTmux ? `<span class="badge-tmux">${isDetachedTmux ? 'tmux: デタッチ中' : 'tmux'}</span>` : ''}
+        ${isOtherWindow ? '<span class="badge-external">別ウィンドウ</span>' : ''}
         ${isHistorical ? '<span class="badge-history">履歴</span>' : ''}
         <span class="session-pid">PID ${session.pid}</span>
         <span class="expand-icon">▶</span>
@@ -570,7 +588,7 @@ function renderSessionCard(session) {
           <div class="detail-label">会話</div>
           <div class="conversation" data-scroll-key="conv-${session.id}">${conversationHtml}</div>
         </div>
-        ${isExternal || isHistorical ? '' : `
+        ${isExternal || isHistorical || isDetachedTmux ? '' : `
         <div class="detail-section">
           <div class="detail-label">指示を送る</div>
           <div class="instruction-form">

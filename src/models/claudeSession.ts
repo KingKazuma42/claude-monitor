@@ -21,6 +21,8 @@ export interface ClaudeSession {
   contextWindow?: ContextWindowUsage;
   contextPct?: number;
   terminal?: vscode.Terminal;
+  /** tmux session name if this Claude process is running inside a tmux session */
+  tmuxSessionName?: string;
 }
 
 export function createSession(pid: number, workDir: string, terminal?: vscode.Terminal): ClaudeSession {
