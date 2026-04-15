@@ -5,7 +5,7 @@ import * as os from 'os';
 import { ClaudeSession, createSession, updateSessionStatus } from './models/claudeSession';
 import { ProcessMonitor, ProcessInfo } from './monitors/processMonitor';
 import { FileWatcher, ClaudeFileActivity } from './monitors/fileWatcher';
-import { TerminalManager } from './terminals/terminalManager';
+import { TerminalManager, TerminalInfo } from './terminals/terminalManager';
 import { ClaudeMonitorPanel } from './views/claudeMonitorPanel';
 import { ClaudeStatusBar } from './views/statusBarItem';
 import { IpcManager, IpcCommand } from './ipc/ipcManager';
@@ -20,6 +20,13 @@ import {
   isRuntimeSessionMetadataConsistent,
   readRuntimeSessionMetadata,
 } from './utils/runtimeSessionMetadata';
+import {
+  detectPlatform,
+  getInstallCommand,
+  getPanePidToSessionName,
+  isTmuxAvailable,
+  makeTmuxSessionName,
+} from './utils/tmuxManager';
 import { SessionHistoryEntry } from './views/claudeMonitorPanel';
 
 // Sessions keyed by PID
@@ -130,9 +137,15 @@ function applyPreferredContextWindow(session: ClaudeSession): ClaudeSession {
 
 function handleProcessUpdate(processes: ProcessInfo[]): void {
   const seenPids = new Set(processes.map(p => p.pid));
+  // Fetch tmux pane→session mapping once per poll (fast, returns empty map if tmux not running)
+  const panePidMap = getPanePidToSessionName();
 
   for (const proc of processes) {
     const termInfo = terminalManager.getByPid(proc.pid) ?? terminalManager.getByPid(proc.ppid);
+    // Detect if Claude is running inside a tmux session.
+    // Handles both direct-pane (Claude IS pane process) and shell-wrapped (Claude is child of pane shell).
+    const tmuxSessionName = panePidMap.get(proc.pid) ?? panePidMap.get(proc.ppid);
+    const tmuxTerminal = tmuxSessionName ? terminalManager.getTmuxTerminal(tmuxSessionName) : undefined;
     const metadata = readRuntimeSessionMetadata(proc.pid);
     const runtimeSession = metadata && isRuntimeSessionMetadataConsistent(metadata, proc.workDir, proc.startedAt)
       ? metadata
@@ -154,9 +167,14 @@ function handleProcessUpdate(processes: ProcessInfo[]): void {
         clearIdentityMappingsForPid(proc.pid);
       }
 
+      // Validate the cached terminal: if it was closed since the last poll,
+      // the 'close' event clears it, but guard here too for safety.
+      const validatedTerminal = existing.terminal && terminalManager.isTerminalTracked(existing.terminal)
+        ? existing.terminal
+        : (termInfo?.terminal ?? tmuxTerminal);
       nextSession = {
         ...existing,
-        terminal: existing.terminal ?? termInfo?.terminal,
+        terminal: validatedTerminal,
         cpuPercent: proc.cpu,
         memoryMB: proc.memMB,
         workDir: runtimeWorkDir || existing.workDir,
@@ -165,10 +183,11 @@ function handleProcessUpdate(processes: ProcessInfo[]): void {
         startedAt: runtimeStartedAt ?? existing.startedAt,
         // Preserve file-based status (thinking/waiting); only reset stopped → idle
         status: existing.status === 'stopped' ? 'idle' : existing.status,
+        tmuxSessionName: tmuxSessionName ?? existing.tmuxSessionName,
       };
     } else {
       // Terminal PID = shell (bash/zsh). Claude's PPID = shell PID, so check both.
-      const session = createSession(proc.pid, runtimeWorkDir, termInfo?.terminal);
+      const session = createSession(proc.pid, runtimeWorkDir, termInfo?.terminal ?? tmuxTerminal);
       // If the process was started with `claude --name <name>` / `claude -n <name>`,
       // use that name so the user's chosen label is visible in the panel.
       if (proc.sessionName) {
@@ -185,6 +204,7 @@ function handleProcessUpdate(processes: ProcessInfo[]): void {
         memoryMB: proc.memMB,
         claudeSessionId: runtimeSession?.sessionId,
         transcriptPath,
+        tmuxSessionName,
       };
     }
 
@@ -770,7 +790,18 @@ export function activate(context: vscode.ExtensionContext): void {
   fileWatcher.on('activity', handleFileActivity);
 
   terminalManager.on('open', () => broadcastUpdate());
-  terminalManager.on('close', () => broadcastUpdate());
+  terminalManager.on('close', (info: TerminalInfo) => {
+    // Immediately clear the terminal reference from any session that holds it.
+    // Without this, a closed tmux attach-terminal would leave session.terminal pointing
+    // to an invalid object, causing "ターミナルを開く" to silently fail instead of
+    // transitioning the session to "detached" state and showing the Reattach button.
+    for (const [pid, session] of sessions) {
+      if (session.terminal === info.terminal) {
+        sessions.set(pid, { ...session, terminal: undefined });
+      }
+    }
+    broadcastUpdate();
+  });
 
   ipcManager.on('command', cmd => {
     void handleIpcCommand(cmd);
@@ -820,6 +851,9 @@ export function activate(context: vscode.ExtensionContext): void {
       const workDir = await pickDirectory(startDir);
       if (!workDir) return;
 
+      const launchMode = await pickLaunchMode();
+      if (launchMode === null) return;
+
       const config = await pickModelAndAgent(workDir);
       if (config === null) return;
 
@@ -834,13 +868,25 @@ export function activate(context: vscode.ExtensionContext): void {
       const launchEnvironment = getConfiguredLaunchEnvironment();
       if (launchEnvironment === null) return;
 
-      terminalManager.createClaudeTerminal(
-        workDir,
-        config.model,
-        config.agent,
-        sessionName || undefined,
-        launchEnvironment,
-      );
+      if (launchMode === 'tmux') {
+        const tmuxName = makeTmuxSessionName(workDir, sessionName || undefined);
+        terminalManager.createTmuxClaudeTerminal(
+          tmuxName,
+          workDir,
+          config.model,
+          config.agent,
+          sessionName || undefined,
+          launchEnvironment,
+        );
+      } else {
+        terminalManager.createClaudeTerminal(
+          workDir,
+          config.model,
+          config.agent,
+          sessionName || undefined,
+          launchEnvironment,
+        );
+      }
     })
   );
 
@@ -943,6 +989,18 @@ function registerPanelMessages(): void {
         break;
       }
 
+      case 'reattachTmux': {
+        if (!msg.sessionId) break;
+        const session = getSessions().find(s => s.id === msg.sessionId);
+        if (!session?.tmuxSessionName) break;
+        terminalManager.createReattachTerminal(
+          session.tmuxSessionName,
+          session.workDir,
+          session.terminalName,
+        );
+        break;
+      }
+
       case 'refresh':
         broadcastUpdate();
         break;
@@ -1024,6 +1082,82 @@ function scanAgents(workDir: string): AgentDefinition[] {
   }
 
   return agents;
+}
+
+/**
+ * Open a terminal that runs the platform-appropriate tmux install command.
+ * The user can see the output and enter their sudo password if needed.
+ */
+async function installTmuxInTerminal(): Promise<void> {
+  const platform = detectPlatform();
+  const installCmd = getInstallCommand(platform);
+
+  if (!installCmd) {
+    void vscode.window.showErrorMessage(
+      'お使いの OS のパッケージマネージャーを特定できませんでした。' +
+      '手動で tmux をインストールしてください（例: sudo apt-get install -y tmux）。'
+    );
+    return;
+  }
+
+  const answer = await vscode.window.showInformationMessage(
+    `tmux をインストールします\n\nコマンド: ${installCmd}`,
+    { modal: true },
+    'インストール開始'
+  );
+  if (answer !== 'インストール開始') return;
+
+  const terminal = vscode.window.createTerminal({ name: 'Install tmux' });
+  terminal.sendText(installCmd);
+  terminal.show();
+
+  void vscode.window.showInformationMessage(
+    'インストール完了後、ターミナルを閉じて「新しいセッション」を再度お試しください。'
+  );
+}
+
+/**
+ * Ask the user whether to launch Claude in a tmux session or a normal terminal.
+ * Returns 'tmux' | 'normal', or null if the user cancelled / chose to install tmux first.
+ */
+async function pickLaunchMode(): Promise<'tmux' | 'normal' | null> {
+  const tmuxAvailable = isTmuxAvailable();
+
+  type Mode = 'normal' | 'tmux' | 'install-tmux';
+  interface ModeItem extends vscode.QuickPickItem { mode: Mode; }
+
+  const items: ModeItem[] = [
+    {
+      label: '$(terminal) 通常のターミナル',
+      description: 'SSH接続が切れるとセッションが終了します',
+      mode: 'normal',
+    },
+    tmuxAvailable
+      ? {
+          label: '$(server) tmux セッション（推奨: SSH環境）',
+          description: 'SSH切断後もClaudeが動き続けます。再接続後に Reattach できます',
+          mode: 'tmux',
+        }
+      : {
+          label: '$(cloud-download) tmux をインストールして使う',
+          description: 'tmux をインストールしてから永続セッションを起動します',
+          mode: 'install-tmux',
+        },
+  ];
+
+  const picked = await vscode.window.showQuickPick(items, {
+    title: '起動モードを選択',
+    placeHolder: 'SSH環境では tmux セッションを推奨します',
+  });
+
+  if (!picked) return null;
+
+  if (picked.mode === 'install-tmux') {
+    await installTmuxInTerminal();
+    return null; // ユーザーにインストール後に再試行させる
+  }
+
+  return picked.mode;
 }
 
 /**

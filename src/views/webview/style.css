@@ -452,6 +452,15 @@ body {
   white-space: nowrap;
 }
 
+.badge-tmux {
+  font-size: 9px;
+  padding: 1px 5px;
+  border-radius: 8px;
+  background: rgba(0, 150, 136, 0.2);
+  color: var(--vscode-terminal-ansiGreen, #4caf50);
+  white-space: nowrap;
+}
+
 .expand-icon {
   font-size: 10px;
   color: var(--vscode-descriptionForeground);
@@ -526,6 +535,15 @@ body {
 .btn-reject {
   border-color: var(--vscode-inputValidation-warningBorder, #ff9800);
   color: var(--vscode-inputValidation-warningForeground, #ffb74d);
+}
+
+.btn-reattach {
+  border-color: var(--vscode-terminal-ansiGreen, #4caf50);
+  color: var(--vscode-terminal-ansiGreen, #4caf50);
+}
+
+.btn-reattach:hover {
+  background: rgba(76, 175, 80, 0.15);
 }
 
 .detail-section-kill {

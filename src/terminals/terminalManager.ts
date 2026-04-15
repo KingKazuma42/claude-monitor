@@ -12,6 +12,10 @@ export interface TerminalInfo {
 export class TerminalManager extends EventEmitter {
   private terminals: Map<vscode.Terminal, TerminalInfo> = new Map();
   private disposables: vscode.Disposable[] = [];
+  /** tmux session name → VSCode Terminal (for sessions created or reattached here) */
+  private tmuxSessionToTerminal: Map<string, vscode.Terminal> = new Map();
+  /** VSCode Terminal → tmux session name (reverse lookup for cleanup) */
+  private tmuxTerminalToSession: Map<vscode.Terminal, string> = new Map();
 
   start(): void {
     // Track existing terminals
@@ -46,6 +50,12 @@ export class TerminalManager extends EventEmitter {
     if (info) {
       this.emit('close', info);
       this.terminals.delete(terminal);
+    }
+    // Clean up tmux mappings if this was a tmux-attached terminal
+    const tmuxName = this.tmuxTerminalToSession.get(terminal);
+    if (tmuxName) {
+      this.tmuxSessionToTerminal.delete(tmuxName);
+      this.tmuxTerminalToSession.delete(terminal);
     }
   }
 
@@ -94,6 +104,90 @@ export class TerminalManager extends EventEmitter {
     if (!info) return false;
     this.sendText(info.terminal, text);
     return true;
+  }
+
+  /**
+   * Return the VSCode Terminal associated with a tmux session name, if any.
+   * Used by the process monitor to link a tmux-managed Claude PID to its attach terminal.
+   */
+  getTmuxTerminal(sessionName: string): vscode.Terminal | undefined {
+    return this.tmuxSessionToTerminal.get(sessionName);
+  }
+
+  /**
+   * Returns true if the given terminal is still open and tracked.
+   * Use this to validate cached terminal references before interacting with them.
+   */
+  isTerminalTracked(terminal: vscode.Terminal): boolean {
+    return this.terminals.has(terminal);
+  }
+
+  /**
+   * Create a new terminal that launches Claude inside a new tmux session.
+   * The terminal attaches to the session immediately; when the terminal closes
+   * (e.g. SSH disconnect) the tmux session continues running on the server.
+   *
+   * @param tmuxSessionName Name for the tmux session (must be unique)
+   * @param workDir Working directory passed to both tmux and Claude
+   * @param model Optional --model flag
+   * @param agent Optional --agent flag
+   * @param sessionName Optional --name flag shown in the monitor panel
+   * @param environment Optional environment overrides
+   */
+  createTmuxClaudeTerminal(
+    tmuxSessionName: string,
+    workDir?: string,
+    model?: string,
+    agent?: string,
+    sessionName?: string,
+    environment?: Record<string, string>,
+  ): vscode.Terminal {
+    const args = buildClaudeCliArgs({ model, agent, sessionName });
+    const name = sessionName ?? tmuxSessionName;
+
+    // Run: tmux new-session -s <name> claude [args...]
+    // tmux starts attached (no -d flag), so the terminal shows Claude directly.
+    // When the VSCode terminal closes, tmux detaches and the session survives.
+    const terminal = vscode.window.createTerminal({
+      name,
+      cwd: workDir,
+      shellPath: 'tmux',
+      shellArgs: ['new-session', '-s', tmuxSessionName, 'claude', ...args],
+      env: environment,
+    });
+
+    this.tmuxSessionToTerminal.set(tmuxSessionName, terminal);
+    this.tmuxTerminalToSession.set(terminal, tmuxSessionName);
+
+    terminal.show();
+    return terminal;
+  }
+
+  /**
+   * Create a new terminal that reattaches to an existing tmux session.
+   * Used when a session was detached (e.g. after SSH reconnect).
+   *
+   * @param tmuxSessionName Name of the existing tmux session
+   * @param workDir Optional working directory hint for the terminal
+   * @param terminalName Display name for the VSCode terminal tab
+   */
+  createReattachTerminal(
+    tmuxSessionName: string,
+    workDir?: string,
+    terminalName?: string,
+  ): vscode.Terminal {
+    const terminal = vscode.window.createTerminal({
+      name: terminalName ?? tmuxSessionName,
+      cwd: workDir,
+      shellPath: 'tmux',
+      shellArgs: ['attach-session', '-t', tmuxSessionName],
+    });
+
+    this.tmuxSessionToTerminal.set(tmuxSessionName, terminal);
+    this.tmuxTerminalToSession.set(terminal, tmuxSessionName);
+
+    terminal.show();
+    return terminal;
   }
 
   /**
@@ -147,5 +241,7 @@ export class TerminalManager extends EventEmitter {
     }
     this.disposables = [];
     this.terminals.clear();
+    this.tmuxSessionToTerminal.clear();
+    this.tmuxTerminalToSession.clear();
   }
 }

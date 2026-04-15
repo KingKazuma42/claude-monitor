@@ -77,6 +77,7 @@ export class ClaudeMonitorPanel implements vscode.WebviewViewProvider {
       contextPct: s.contextWindow?.pct ?? s.contextPct,
       conversation: s.conversation ?? [],
       isExternal: s.terminal === undefined,
+      tmuxSessionName: s.tmuxSessionName,
     }));
 
     const historyPayload = history.map(s => ({
@@ -158,7 +159,7 @@ export class ClaudeMonitorPanel implements vscode.WebviewViewProvider {
 }
 
 export interface WebviewMessage {
-  type: 'sendInstruction' | 'focusTerminal' | 'killSession' | 'refresh' | 'approvePermission' | 'ready';
+  type: 'sendInstruction' | 'focusTerminal' | 'killSession' | 'refresh' | 'approvePermission' | 'ready' | 'reattachTmux';
   sessionId?: string;
   text?: string;
   choice?: 'yes' | 'no';
