@@ -1,6 +1,7 @@
 import * as vscode from 'vscode';
 import * as path from 'path';
 import { ClaudeSession } from '../models/claudeSession';
+import type { CronSchedule } from '../models/cronSchedule';
 
 export class ClaudeMonitorPanel implements vscode.WebviewViewProvider {
   public static readonly viewId = 'claudeMonitor.panel';
@@ -118,6 +119,24 @@ export class ClaudeMonitorPanel implements vscode.WebviewViewProvider {
     return this.view.webview.onDidReceiveMessage(handler);
   }
 
+  /** Tell the webview to open the cron manager overlay. */
+  openCronManager(): void {
+    if (!this.view || !this.isReady) return;
+    this.view.webview.postMessage({ type: 'openCronManager' });
+  }
+
+  /** Push the current cron schedule list to the webview. */
+  sendCronSchedules(schedules: CronSchedule[]): void {
+    if (!this.view || !this.isReady) return;
+    this.view.webview.postMessage({ type: 'cronSchedules', schedules });
+  }
+
+  /** Notify the webview that a schedule just fired. */
+  notifyCronFired(scheduleId: string, label: string, sessionCount: number): void {
+    if (!this.view || !this.isReady) return;
+    this.view.webview.postMessage({ type: 'cronFired', scheduleId, label, sessionCount });
+  }
+
   private flushLatestPayload(): void {
     if (!this.view || !this.isReady) {
       return;
@@ -152,6 +171,7 @@ export class ClaudeMonitorPanel implements vscode.WebviewViewProvider {
 </head>
 <body>
   <div id="session-list" class="session-list"></div>
+  <div id="cron-overlay" class="cron-overlay" style="display:none"></div>
   <script nonce="${nonce}" src="${scriptUri}"></script>
 </body>
 </html>`;
@@ -159,10 +179,18 @@ export class ClaudeMonitorPanel implements vscode.WebviewViewProvider {
 }
 
 export interface WebviewMessage {
-  type: 'sendInstruction' | 'focusTerminal' | 'killSession' | 'refresh' | 'approvePermission' | 'ready' | 'reattachTmux';
+  type:
+    | 'sendInstruction' | 'focusTerminal' | 'killSession'
+    | 'refresh' | 'approvePermission' | 'ready' | 'reattachTmux'
+    | 'getCronSchedules'
+    | 'addCronSchedule' | 'updateCronSchedule' | 'deleteCronSchedule';
   sessionId?: string;
   text?: string;
   choice?: 'yes' | 'no';
+  /** Cron schedule payload (add / update). */
+  schedule?: CronSchedule;
+  /** ID of the schedule to delete. */
+  scheduleId?: string;
 }
 
 export interface SessionHistoryEntry extends ClaudeSession {

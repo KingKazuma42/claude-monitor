@@ -28,6 +28,8 @@ import {
   makeTmuxSessionName,
 } from './utils/tmuxManager';
 import { SessionHistoryEntry } from './views/claudeMonitorPanel';
+import { CronScheduler, ScheduleFiredEvent } from './utils/cronScheduler';
+import { CronSchedule, generateScheduleId } from './models/cronSchedule';
 
 // Sessions keyed by PID
 const sessions = new Map<number, ClaudeSession>();
@@ -47,6 +49,7 @@ let processMonitor: ProcessMonitor;
 let fileWatcher: FileWatcher;
 let terminalManager: TerminalManager;
 let ipcManager: IpcManager;
+let cronScheduler: CronScheduler;
 let messageDisposable: vscode.Disposable | undefined;
 let hasCleanedUp = false;
 let contextWarningThresholdPct = 90;
@@ -61,6 +64,10 @@ const CLAUDE_SETTINGS_PATH = path.join(os.homedir(), '.claude', 'settings.json')
 
 function getSessions(): ClaudeSession[] {
   return Array.from(sessions.values());
+}
+
+function broadcastCronSchedules(): void {
+  panel.sendCronSchedules(cronScheduler.getSchedules());
 }
 
 function broadcastUpdate(): void {
@@ -717,6 +724,7 @@ function cleanupResources(): void {
   fileWatcher?.stop();
   terminalManager?.stop();
   ipcManager?.stop();
+  cronScheduler?.stop();
   statusBar?.dispose();
   messageDisposable?.dispose();
 }
@@ -771,6 +779,10 @@ export function activate(context: vscode.ExtensionContext): void {
   fileWatcher = new FileWatcher();
   terminalManager = new TerminalManager();
   ipcManager = new IpcManager();
+  cronScheduler = new CronScheduler(async (schedules) => {
+    await context.globalState.update('cronSchedules', schedules);
+  });
+  cronScheduler.load(context.globalState.get<CronSchedule[]>('cronSchedules', []));
 
   // ── WebView provider ──
   context.subscriptions.push(
@@ -807,6 +819,53 @@ export function activate(context: vscode.ExtensionContext): void {
     void handleIpcCommand(cmd);
   });
 
+  cronScheduler.on('fire', (event: ScheduleFiredEvent) => {
+    const { schedule } = event;
+    const allActive = getSessions().filter(s => s.status !== 'stopped');
+
+    // Prefer targetSessionId for precise single-session targeting.
+    // Fall back to targetWorkDir when the session has been restarted (id changed).
+    // When neither is set, broadcast to all active sessions.
+    let targetSessions: typeof allActive;
+    if (schedule.targetSessionId) {
+      const byId = allActive.filter(s => s.id === schedule.targetSessionId);
+      if (byId.length > 0) {
+        targetSessions = byId;
+      } else if (schedule.targetWorkDir) {
+        // Session was restarted — fall back to workDir match
+        targetSessions = allActive.filter(s => s.workDir === schedule.targetWorkDir);
+      } else {
+        targetSessions = [];
+      }
+    } else if (schedule.targetWorkDir) {
+      targetSessions = allActive.filter(s => s.workDir === schedule.targetWorkDir);
+    } else {
+      targetSessions = allActive;
+    }
+
+    for (const session of targetSessions) {
+      if (session.terminal) {
+        terminalManager.sendText(session.terminal, schedule.instruction);
+      } else {
+        void ipcManager.dispatch('sendText', session.pid, schedule.instruction);
+      }
+    }
+
+    const count = targetSessions.length;
+    const isTargeted = Boolean(schedule.targetSessionId || schedule.targetWorkDir);
+    const targetDesc = isTargeted
+      ? `"${schedule.targetWorkDir?.split('/').at(-1) ?? 'セッション'}"` // basename of workDir
+      : `全セッション`;
+    const msg = count > 0
+      ? `⏰ "${schedule.label}" を ${targetDesc} の ${count} セッションへ送信しました`
+      : `⏰ "${schedule.label}" が発火しましたが、対象セッションがありませんでした`;
+    vscode.window.setStatusBarMessage(msg, 5000);
+
+    panel.notifyCronFired(schedule.id, schedule.label, count);
+    // Refresh overlay if open (lastFiredAt updated in scheduler)
+    broadcastCronSchedules();
+  });
+
   // ── Panel message handler ──
   // Register messages and send initial state when webview resolves
   panel.onDidResolve(() => {
@@ -829,6 +888,11 @@ export function activate(context: vscode.ExtensionContext): void {
 
     vscode.commands.registerCommand('claudeMonitor.installStatuslineBridge', async () => {
       await installStatuslineBridge();
+    }),
+
+    vscode.commands.registerCommand('claudeMonitor.manageCronSchedules', () => {
+      void vscode.commands.executeCommand('claudeMonitor.panel.focus');
+      panel.openCronManager();
     }),
 
     vscode.commands.registerCommand('claudeMonitor.newSession', async () => {
@@ -895,6 +959,7 @@ export function activate(context: vscode.ExtensionContext): void {
   fileWatcher.start();
   terminalManager.start();
   ipcManager.start();
+  cronScheduler.start();
   applyConfiguration(cfg);
 
   context.subscriptions.push(
@@ -1008,7 +1073,38 @@ function registerPanelMessages(): void {
       case 'ready':
         panel.markReady();
         broadcastUpdate();
+        broadcastCronSchedules();
         break;
+
+      case 'getCronSchedules':
+        broadcastCronSchedules();
+        break;
+
+      case 'addCronSchedule': {
+        if (!msg.schedule) break;
+        const newSched: CronSchedule = {
+          ...msg.schedule,
+          id: generateScheduleId(),
+          createdAt: new Date().toISOString(),
+        };
+        await cronScheduler.addSchedule(newSched);
+        broadcastCronSchedules();
+        break;
+      }
+
+      case 'updateCronSchedule': {
+        if (!msg.schedule) break;
+        await cronScheduler.updateSchedule(msg.schedule);
+        broadcastCronSchedules();
+        break;
+      }
+
+      case 'deleteCronSchedule': {
+        if (!msg.scheduleId) break;
+        await cronScheduler.deleteSchedule(msg.scheduleId);
+        broadcastCronSchedules();
+        break;
+      }
 
       case 'approvePermission': {
         if (!msg.sessionId || (msg.choice !== 'yes' && msg.choice !== 'no')) break;

@@ -15,6 +15,14 @@ let dashboardExpanded = false;
 let showUsageDashboard = true;
 const SESSION_WINDOW_MINUTES = 5 * 60;
 
+// ── Cron Manager State ────────────────────────────────────────────────────────
+/** @type {any[]} */
+let currentCronSchedules = [];
+let cronOverlayVisible = false;
+let cronFormVisible = false;
+/** @type {string | null} */
+let cronEditingId = null;
+
 /**
  * Save input values and scroll positions before a re-render.
  * @returns {{ inputs: Map<string, string>, scrolls: Map<string, {top: number, atBottom: boolean}> }}
@@ -191,6 +199,7 @@ function renderSessions(sessions, history = []) {
       }
     });
   });
+
 }
 
 /**
@@ -775,6 +784,445 @@ function memColor(memMB) {
   return '#0e70c0';
 }
 
+// ── Cron Manager ─────────────────────────────────────────────────────────────
+
+function openCronOverlay() {
+  cronOverlayVisible = true;
+  cronFormVisible = false;
+  cronEditingId = null;
+  vscode.postMessage({ type: 'getCronSchedules' });
+  renderCronOverlay();
+  const overlay = document.getElementById('cron-overlay');
+  if (overlay) overlay.style.display = 'flex';
+}
+
+function closeCronOverlay() {
+  cronOverlayVisible = false;
+  cronFormVisible = false;
+  cronEditingId = null;
+  const overlay = document.getElementById('cron-overlay');
+  if (overlay) overlay.style.display = 'none';
+}
+
+function renderCronOverlay() {
+  const overlay = document.getElementById('cron-overlay');
+  if (!overlay) return;
+
+  overlay.innerHTML = `
+    <div class="cron-header">
+      <span class="cron-title">⏰ スケジュール管理</span>
+      <div class="cron-header-actions">
+        ${!cronFormVisible ? '<button class="btn primary btn-cron-add">＋ 追加</button>' : ''}
+        <button class="btn btn-icon btn-cron-close" title="パネルに戻る" aria-label="パネルに戻る">
+          <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24"
+               fill="none" stroke="currentColor" stroke-width="2.5"
+               stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <line x1="19" y1="12" x2="5" y2="12"/>
+            <polyline points="12 19 5 12 12 5"/>
+          </svg>
+        </button>
+      </div>
+    </div>
+    <div class="cron-body">
+      ${cronFormVisible ? buildCronFormHtml() : buildCronListHtml()}
+    </div>`;
+
+  bindCronOverlayEvents(overlay);
+}
+
+/** @param {HTMLElement} overlay */
+function bindCronOverlayEvents(overlay) {
+  overlay.querySelector('.btn-cron-close')
+    ?.addEventListener('click', () => closeCronOverlay());
+
+  if (!cronFormVisible) {
+    overlay.querySelector('.btn-cron-add')?.addEventListener('click', () => {
+      cronFormVisible = true;
+      cronEditingId = null;
+      renderCronOverlay();
+    });
+
+    overlay.querySelectorAll('.btn-cron-edit').forEach(btn => {
+      btn.addEventListener('click', e => {
+        e.stopPropagation();
+        cronEditingId = /** @type {HTMLElement} */ (btn).dataset.id ?? null;
+        cronFormVisible = true;
+        renderCronOverlay();
+      });
+    });
+
+    overlay.querySelectorAll('.btn-cron-delete').forEach(btn => {
+      btn.addEventListener('click', e => {
+        e.stopPropagation();
+        const id = /** @type {HTMLElement} */ (btn).dataset.id;
+        if (!id) return;
+        vscode.postMessage({ type: 'deleteCronSchedule', scheduleId: id });
+      });
+    });
+
+    overlay.querySelectorAll('.cron-toggle-input').forEach(input => {
+      input.addEventListener('change', () => {
+        const id = /** @type {HTMLInputElement} */ (input).dataset.id;
+        const sched = currentCronSchedules.find(s => s.id === id);
+        if (!sched) return;
+        vscode.postMessage({
+          type: 'updateCronSchedule',
+          schedule: { ...sched, enabled: /** @type {HTMLInputElement} */ (input).checked },
+        });
+      });
+    });
+
+  } else {
+    // ── Form events ──
+    overlay.querySelector('.btn-cron-cancel')?.addEventListener('click', () => {
+      cronFormVisible = false;
+      cronEditingId = null;
+      renderCronOverlay();
+    });
+
+    overlay.querySelector('.btn-cron-save')?.addEventListener('click', () => {
+      submitCronForm(overlay);
+    });
+
+    // Type radio toggle
+    overlay.querySelectorAll('input[name="cron-type"]').forEach(radio => {
+      radio.addEventListener('change', () => {
+        const r = /** @type {HTMLInputElement} */ (radio);
+        const intervalFields = overlay.querySelector('#cron-interval-fields');
+        const dailyFields = overlay.querySelector('#cron-daily-fields');
+        if (!intervalFields || !dailyFields) return;
+        if (r.value === 'interval' && r.checked) {
+          intervalFields.classList.remove('hidden');
+          dailyFields.classList.add('hidden');
+        } else if (r.value === 'daily' && r.checked) {
+          intervalFields.classList.add('hidden');
+          dailyFields.classList.remove('hidden');
+        }
+      });
+    });
+
+    // Target radio toggle
+    overlay.querySelectorAll('input[name="cron-target"]').forEach(radio => {
+      radio.addEventListener('change', () => {
+        const r = /** @type {HTMLInputElement} */ (radio);
+        const picker = overlay.querySelector('#cron-target-picker');
+        if (!picker) return;
+        if (r.value === 'specific' && r.checked) {
+          picker.classList.remove('hidden');
+          // Auto-select the first real session if nothing is chosen yet
+          const sel = /** @type {HTMLSelectElement | null} */(overlay.querySelector('#cron-form-target'));
+          if (sel) {
+            if (!sel.value) {
+              const first = Array.from(sel.options).find(o => o.value !== '');
+              if (first) sel.value = first.value;
+            }
+            sel.style.outline = ''; // clear any previous error state
+          }
+        } else if (r.value === 'all' && r.checked) {
+          picker.classList.add('hidden');
+        }
+      });
+    });
+
+    // Preset chips
+    overlay.querySelectorAll('.cron-chip').forEach(chip => {
+      chip.addEventListener('click', () => {
+        const minutes = /** @type {HTMLElement} */ (chip).dataset.minutes;
+        const minutesInput = /** @type {HTMLInputElement | null} */ (
+          overlay.querySelector('#cron-form-minutes')
+        );
+        if (minutesInput && minutes) minutesInput.value = minutes;
+      });
+    });
+  }
+}
+
+function buildCronListHtml() {
+  if (currentCronSchedules.length === 0) {
+    return `
+      <div class="cron-empty">
+        <p>スケジュールはまだありません。</p>
+        <p>「＋ 追加」でスケジュールを作成してください。</p>
+      </div>`;
+  }
+  return `<div class="cron-items">
+    ${currentCronSchedules.map(sched => buildCronItemHtml(sched)).join('')}
+  </div>`;
+}
+
+/** @param {any} sched */
+function buildCronItemHtml(sched) {
+  const specLabel = formatScheduleSpecJs(sched.spec);
+  const lastFiredLabel = formatLastFired(sched.lastFiredAt);
+  const instruction = (sched.instruction ?? '').trim();
+  const displayInstruction = instruction.length > 60
+    ? instruction.slice(0, 60) + '…'
+    : instruction;
+
+  const targetLabel = sched.targetWorkDir
+    ? `📁 ${shortenPath(sched.targetWorkDir)}`
+    : '📢 全セッション';
+
+  return `
+    <div class="cron-item ${sched.enabled ? '' : 'cron-item-disabled'}">
+      <label class="cron-toggle" title="${sched.enabled ? '無効にする' : '有効にする'}">
+        <input type="checkbox" class="cron-toggle-input"
+               data-id="${escapeHtml(sched.id)}" ${sched.enabled ? 'checked' : ''}>
+        <span class="cron-toggle-thumb"></span>
+      </label>
+      <div class="cron-item-body">
+        <div class="cron-item-label">${escapeHtml(sched.label || '(無題)')}</div>
+        <div class="cron-item-meta">${escapeHtml(specLabel)} · ${escapeHtml(targetLabel)} · ${escapeHtml(lastFiredLabel)}</div>
+        ${displayInstruction
+          ? `<div class="cron-item-instruction">${escapeHtml(displayInstruction)}</div>`
+          : ''}
+      </div>
+      <div class="cron-item-actions">
+        <button class="btn btn-cron-edit" data-id="${escapeHtml(sched.id)}">編集</button>
+        <button class="btn danger btn-cron-delete" data-id="${escapeHtml(sched.id)}">削除</button>
+      </div>
+    </div>`;
+}
+
+function buildCronFormHtml() {
+  const sched = cronEditingId
+    ? currentCronSchedules.find(s => s.id === cronEditingId)
+    : null;
+
+  const isInterval      = !sched || sched.spec?.type === 'interval';
+  const label           = escapeHtml(sched?.label ?? '');
+  const instruction     = escapeHtml(sched?.instruction ?? '');
+  const minutes         = sched?.spec?.type === 'interval' ? (sched.spec.minutes ?? 30) : 30;
+  const hour            = sched?.spec?.type === 'daily'    ? (sched.spec.hour ?? 9)     : 9;
+  const minute          = sched?.spec?.type === 'daily'    ? (sched.spec.minute ?? 0)   : 0;
+  const paddedMin       = String(minute).padStart(2, '0');
+  const targetSessionId   = sched?.targetSessionId ?? '';
+  const targetWorkDir     = sched?.targetWorkDir ?? '';
+  // A schedule targets a specific session when either id or workDir is recorded
+  const hasSpecificTarget = Boolean(targetSessionId || targetWorkDir);
+  const formTitle       = sched ? 'スケジュールを編集' : 'スケジュールを追加';
+  const saveLabel       = sched ? '更新' : '追加';
+
+  // Active (non-stopped) sessions for the target picker.
+  // Option value is the session id (unique per process) so two sessions in the
+  // same workDir are always distinguishable.
+  const activeSessions = currentSessions.filter(s => s.status !== 'stopped');
+
+  const sessionOptions = activeSessions.map(s => {
+    // Prefer matching by targetSessionId; fall back to workDir for legacy schedules
+    const isSelected = targetSessionId ? s.id === targetSessionId : s.workDir === targetWorkDir;
+    const selected   = isSelected ? 'selected' : '';
+    const display    = `${escapeHtml(s.terminalName)}  ${escapeHtml(shortenPath(s.workDir))}`;
+    return `<option value="${escapeHtml(s.id)}" ${selected}>${display}</option>`;
+  }).join('');
+
+  const targetPickerHtml = activeSessions.length > 0
+    ? `<select id="cron-form-target" class="cron-input">
+         <option value="" ${!hasSpecificTarget ? 'selected' : ''}>(セッションを選択)</option>
+         ${sessionOptions}
+       </select>`
+    : `<div class="cron-target-empty">現在実行中のセッションがありません</div>`;
+
+  return `
+    <div class="cron-form">
+      <div class="cron-form-title">${formTitle}</div>
+
+      <div class="cron-form-row">
+        <div class="cron-form-label">ラベル</div>
+        <input id="cron-form-label" class="cron-input" type="text"
+               value="${label}" placeholder="例: 進捗確認、朝のチェック">
+      </div>
+
+      <div class="cron-form-row">
+        <div class="cron-form-label">タイミング</div>
+        <div class="cron-type-row">
+          <label class="cron-radio-label">
+            <input type="radio" name="cron-type" value="interval" ${isInterval ? 'checked' : ''}>
+            毎N分
+          </label>
+          <label class="cron-radio-label">
+            <input type="radio" name="cron-type" value="daily" ${!isInterval ? 'checked' : ''}>
+            毎日
+          </label>
+        </div>
+      </div>
+
+      <div id="cron-interval-fields" class="cron-form-row ${isInterval ? '' : 'hidden'}">
+        <div class="cron-form-label">間隔</div>
+        <div class="cron-interval-row">
+          <input id="cron-form-minutes" class="cron-input cron-input-num"
+                 type="number" min="1" max="1440" value="${minutes}">
+          <span class="cron-unit">分ごと</span>
+        </div>
+        <div class="cron-preset-chips">
+          <button class="cron-chip" data-minutes="15">15分</button>
+          <button class="cron-chip" data-minutes="30">30分</button>
+          <button class="cron-chip" data-minutes="60">1時間</button>
+          <button class="cron-chip" data-minutes="120">2時間</button>
+          <button class="cron-chip" data-minutes="240">4時間</button>
+        </div>
+      </div>
+
+      <div id="cron-daily-fields" class="cron-form-row ${!isInterval ? '' : 'hidden'}">
+        <div class="cron-form-label">時刻</div>
+        <div class="cron-time-row">
+          <input id="cron-form-hour" class="cron-input cron-input-num"
+                 type="number" min="0" max="23" value="${hour}">
+          <span class="cron-unit">:</span>
+          <input id="cron-form-minute-val" class="cron-input cron-input-num"
+                 type="number" min="0" max="59" step="5" value="${paddedMin}">
+        </div>
+      </div>
+
+      <div class="cron-form-row">
+        <div class="cron-form-label">指示テキスト</div>
+        <textarea id="cron-form-instruction" class="cron-textarea" rows="3"
+                  placeholder="Claude に送る指示を入力してください">${instruction}</textarea>
+      </div>
+
+      <div class="cron-form-row">
+        <div class="cron-form-label">送信先</div>
+        <div class="cron-type-row">
+          <label class="cron-radio-label">
+            <input type="radio" name="cron-target" value="all"
+                   ${!hasSpecificTarget ? 'checked' : ''}>
+            全セッション
+          </label>
+          <label class="cron-radio-label">
+            <input type="radio" name="cron-target" value="specific"
+                   ${hasSpecificTarget ? 'checked' : ''}>
+            指定のセッション
+          </label>
+        </div>
+        <div id="cron-target-picker" class="${hasSpecificTarget ? '' : 'hidden'}">
+          ${targetPickerHtml}
+        </div>
+      </div>
+
+      <div class="cron-form-actions">
+        <button class="btn btn-cron-cancel">キャンセル</button>
+        <button class="btn primary btn-cron-save">${saveLabel}</button>
+      </div>
+    </div>`;
+}
+
+/** @param {HTMLElement} overlay */
+function submitCronForm(overlay) {
+  const labelInput       = /** @type {HTMLInputElement | null} */  (overlay.querySelector('#cron-form-label'));
+  const instructionInput = /** @type {HTMLTextAreaElement | null} */(overlay.querySelector('#cron-form-instruction'));
+  const typeRadio        = /** @type {HTMLInputElement | null} */  (overlay.querySelector('input[name="cron-type"]:checked'));
+
+  const label       = (labelInput?.value ?? '').trim();
+  const instruction = (instructionInput?.value ?? '').trim();
+  const type        = typeRadio?.value ?? 'interval';
+
+  if (!label) {
+    labelInput?.focus();
+    return;
+  }
+  if (!instruction) {
+    instructionInput?.focus();
+    return;
+  }
+
+  /** @type {any} */
+  let spec;
+  if (type === 'interval') {
+    const minutesInput = /** @type {HTMLInputElement | null} */(overlay.querySelector('#cron-form-minutes'));
+    const minutes = parseInt(minutesInput?.value ?? '30', 10);
+    if (!Number.isFinite(minutes) || minutes < 1 || minutes > 1440) {
+      minutesInput?.focus();
+      return;
+    }
+    spec = { type: 'interval', minutes };
+  } else {
+    const hourInput   = /** @type {HTMLInputElement | null} */(overlay.querySelector('#cron-form-hour'));
+    const minuteInput = /** @type {HTMLInputElement | null} */(overlay.querySelector('#cron-form-minute-val'));
+    const hour   = parseInt(hourInput?.value   ?? '9', 10);
+    const minute = parseInt(minuteInput?.value ?? '0', 10);
+    if (!Number.isFinite(hour)   || hour   < 0 || hour   > 23) { hourInput?.focus();   return; }
+    if (!Number.isFinite(minute) || minute < 0 || minute > 59) { minuteInput?.focus(); return; }
+    spec = { type: 'daily', hour, minute };
+  }
+
+  // Resolve target session: option value is now a session id (e.g. "claude-12345").
+  // We also record the workDir at save time so the schedule can fall back to a
+  // workDir match if the original session is restarted and gets a new id.
+  const targetRadio  = /** @type {HTMLInputElement | null} */(overlay.querySelector('input[name="cron-target"]:checked'));
+  const targetSelect = /** @type {HTMLSelectElement | null} */(overlay.querySelector('#cron-form-target'));
+  const useSpecific  = targetRadio?.value === 'specific';
+  const rawTargetSessionId = targetSelect?.value ?? '';
+
+  // Guard: "指定のセッション" selected but no session chosen
+  if (useSpecific && !rawTargetSessionId) {
+    if (targetSelect) {
+      targetSelect.style.outline = '2px solid var(--vscode-inputValidation-errorBorder, #f48771)';
+      targetSelect.focus();
+    }
+    return;
+  }
+
+  // Look up the session to get its workDir (stable across restarts, used as fallback)
+  const targetSession   = useSpecific ? currentSessions.find(s => s.id === rawTargetSessionId) : undefined;
+  const targetSessionId = useSpecific ? rawTargetSessionId : undefined;
+  const targetWorkDir   = useSpecific ? (targetSession?.workDir ?? undefined) : undefined;
+
+  if (cronEditingId) {
+    const existing = currentCronSchedules.find(s => s.id === cronEditingId);
+    if (!existing) return;
+    vscode.postMessage({
+      type: 'updateCronSchedule',
+      schedule: { ...existing, label, spec, instruction, targetSessionId, targetWorkDir },
+    });
+  } else {
+    vscode.postMessage({
+      type: 'addCronSchedule',
+      schedule: {
+        id: '',  // generated by extension
+        label,
+        spec,
+        instruction,
+        enabled: true,
+        createdAt: new Date().toISOString(),
+        targetSessionId,
+        targetWorkDir,
+      },
+    });
+  }
+
+  cronFormVisible = false;
+  cronEditingId = null;
+  // Overlay will refresh when 'cronSchedules' arrives from the extension
+}
+
+/** @param {any} spec */
+function formatScheduleSpecJs(spec) {
+  if (!spec) return '不明';
+  if (spec.type === 'interval') {
+    const m = spec.minutes;
+    if (m < 60)  return `毎 ${m} 分`;
+    const h = Math.floor(m / 60);
+    const r = m % 60;
+    return r === 0 ? `毎 ${h} 時間` : `毎 ${h} 時間 ${r} 分`;
+  }
+  if (spec.type === 'daily') {
+    const hh = String(spec.hour).padStart(2, '0');
+    const mm = String(spec.minute).padStart(2, '0');
+    return `毎日 ${hh}:${mm}`;
+  }
+  return '不明';
+}
+
+/** @param {string | undefined} isoString */
+function formatLastFired(isoString) {
+  if (!isoString) return '未発火';
+  const diff = Date.now() - new Date(isoString).getTime();
+  if (diff < 60_000)       return 'たった今';
+  if (diff < 3_600_000)    return `${Math.floor(diff / 60_000)} 分前`;
+  if (diff < 86_400_000)   return `${Math.floor(diff / 3_600_000)} 時間前`;
+  return `${Math.floor(diff / 86_400_000)} 日前`;
+}
+
 // ── Message Handler ──
 window.addEventListener('message', event => {
   const msg = event.data;
@@ -783,6 +1231,30 @@ window.addEventListener('message', event => {
       showUsageDashboard = msg.showUsageDashboard !== false;
       renderSessions(msg.sessions, msg.history ?? []);
       break;
+
+    case 'openCronManager':
+      openCronOverlay();
+      break;
+
+    case 'cronSchedules': {
+      currentCronSchedules = msg.schedules ?? [];
+      if (cronOverlayVisible) renderCronOverlay();
+      break;
+    }
+
+    case 'cronFired': {
+      // Update lastFiredAt locally so the list reflects the change immediately
+      const idx = currentCronSchedules.findIndex(s => s.id === msg.scheduleId);
+      if (idx !== -1) {
+        currentCronSchedules = currentCronSchedules.slice();
+        currentCronSchedules[idx] = {
+          ...currentCronSchedules[idx],
+          lastFiredAt: new Date().toISOString(),
+        };
+      }
+      if (cronOverlayVisible) renderCronOverlay();
+      break;
+    }
   }
 });
 

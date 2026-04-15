@@ -2,7 +2,7 @@
   "name": "claude-monitor",
   "displayName": "Claude Monitor",
   "description": "Monitor and control multiple Claude Code CLI instances from VSCode",
-  "version": "0.2.5",
+  "version": "0.3.0",
   "license": "MIT",
   "repository": {
     "type": "git",
@@ -67,6 +67,12 @@
         "title": "Install Statusline Bridge",
         "icon": "$(plug)",
         "category": "Claude Monitor"
+      },
+      {
+        "command": "claudeMonitor.manageCronSchedules",
+        "title": "Cron Schedules",
+        "icon": "$(clock)",
+        "category": "Claude Monitor"
       }
     ],
     "menus": {
@@ -78,6 +84,11 @@
         },
         {
           "command": "claudeMonitor.newSession",
+          "when": "view == claudeMonitor.panel",
+          "group": "navigation"
+        },
+        {
+          "command": "claudeMonitor.manageCronSchedules",
           "when": "view == claudeMonitor.panel",
           "group": "navigation"
         },
@@ -144,7 +155,7 @@
     "watch": "tsc -watch -p ./",
     "package": "npx vsce package",
     "pretest": "npm run compile",
-    "test": "node out/test/claudeCliArgs.test.js && node out/test/contextPct.test.js && node out/test/statuslineSnapshot.test.js && node out/test/disambiguateNames.test.js && node out/test/sessionRouting.test.js && node out/test/runtimeSessionMetadata.test.js && node out/test/sessionName.test.js && node out/test/permissionInput.test.js && node out/test/launchEnvironment.test.js && node out/test/compact.test.js",
+    "test": "node out/test/claudeCliArgs.test.js && node out/test/contextPct.test.js && node out/test/statuslineSnapshot.test.js && node out/test/disambiguateNames.test.js && node out/test/sessionRouting.test.js && node out/test/runtimeSessionMetadata.test.js && node out/test/sessionName.test.js && node out/test/permissionInput.test.js && node out/test/launchEnvironment.test.js && node out/test/compact.test.js && node out/test/cronScheduler.test.js",
     "lint": "eslint src --ext ts"
   },
   "devDependencies": {

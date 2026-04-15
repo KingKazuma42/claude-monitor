@@ -19,6 +19,33 @@ This extension discovers local Claude Code terminals, watches `.claude/projects/
 - Focuses terminals and kills sessions
 - Supports IPC across VS Code windows for non-local sessions
 - Delays permission popups so short auto-accept transitions do not notify unnecessarily
+- **Cron Scheduler** — schedule recurring instructions to be sent automatically to Claude sessions
+
+## Cron Scheduler
+
+The Cron Scheduler lets you define recurring instructions that are automatically sent to active Claude sessions on a time-based schedule.
+
+### Opening the Scheduler
+
+- Click the **⏰ clock icon** in the Claude Monitor panel toolbar, or
+- Run `Claude Monitor: Cron Schedules` from the VS Code command palette.
+
+### Schedule Types
+
+| Type | Description |
+|------|-------------|
+| **Every N minutes** | Fires at a fixed interval (e.g. every 30 minutes) |
+| **Daily at HH:MM** | Fires once per day at the specified local time |
+
+### Targeting
+
+Each schedule can target:
+- **All active sessions** — instruction is broadcast to every non-stopped session
+- **Specific session** — instruction is delivered only to the selected session; if the session restarts, delivery falls back to the same working directory
+
+### Notifications
+
+When a schedule fires, a brief status-bar message confirms how many sessions received the instruction.
 
 ## Getting Started
 
@@ -57,12 +84,12 @@ npm run compile
 npm run package
 
 # Install the generated VSIX into VS Code
-code --install-extension claude-monitor-0.2.5.vsix
+code --install-extension claude-monitor-0.3.0.vsix
 ```
 
 Alternatively, use VS Code's command palette:
 - `Extensions: Install from VSIX...`
-- select `claude-monitor-0.2.5.vsix`
+- select `claude-monitor-0.3.0.vsix`
 
 ### Build
 
